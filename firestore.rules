@@ -14,7 +14,7 @@ service cloud.firestore {
     // rules กันระดับฟิลด์ไม่ได้ จะกันลูกน้องได้จริงหลังแยกไป itemCosts (เช็กลิสต์ข้อ 4)
     match /{col}/{id} {
       allow read, write: if approved()
-        && col in ['items', 'moves', 'buys', 'docs', 'cash', 'closes', 'counts', 'orders', 'customers'];
+        && col in ['items', 'moves', 'buys', 'docs', 'cash', 'closes', 'counts', 'orders', 'customers', 'counters'];
     }
 
     // ตั้งค่าร้าน / ราคารับซื้อ / ประวัติปรับราคา: ทุกคนที่อนุมัติแล้วอ่านได้ เจ้าของแก้ได้คนเดียว

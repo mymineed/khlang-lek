@@ -70,6 +70,7 @@ describe("ลูกน้อง (approved staff)", () => {
     await assertSucceeds(db.doc("docs/d1").set({ total: 100 }));
     await assertSucceeds(db.doc("moves/m1").set({ at: 1 }));
     await assertSucceeds(db.doc("settings/shop").get());
+    await assertSucceeds(db.doc("counters/RC2610").set({ last: 1 }));
   });
   it("แก้ตั้งค่าร้าน / ประวัติราคาไม่ได้", async () => {
     const db = as("staff");

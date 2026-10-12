@@ -3,6 +3,7 @@ import qrcode from "qrcode-generator";
 import "./lib/claude-shim.js";
 import { assetUrl } from "./lib/claude-shim.js";
 import { itemCostPerKg } from "./lib/cost.js";
+import { docPrefix, maxDocSeq, nextSeq, formatDocNo } from "./lib/docno.js";
 import {
   initAuth,
   subscribeAuth,
@@ -56,7 +57,10 @@ function dbStore(db){
   return { mode:"db",
     sub(c,o,cb){ let q=db.collection(c); if(o.order) q=q.orderBy(o.order,"desc"); if(o.limit) q=q.limit(o.limit);
       return q.onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()}))), onDbErr); },
-    set:(p,v)=>db.doc(p).set(v), update:(p,v)=>db.doc(p).update(v), del:p=>db.doc(p).delete() };
+    set:(p,v)=>db.doc(p).set(v), update:(p,v)=>db.doc(p).update(v), del:p=>db.doc(p).delete(),
+    // จองเลขเอกสารแบบ transaction กันเลขซ้ำเมื่อหลายเครื่องออกบิลพร้อมกัน
+    nextSeq:(key,floor)=>db.runTransaction(async t=>{ const ref=db.doc("counters/"+key), s=await t.get(ref);
+      const n=nextSeq(s.exists?s.data().last:0,floor); t.set(ref,{last:n,at:Date.now()}); return n; }) };
 }
 function onDbErr(e){ toast("ฐานข้อมูลขัดข้อง: "+(e&&e.code||"ไม่ทราบสาเหตุ")); }
 const addMove = m => store.set("moves/"+uid(), m);
@@ -1494,10 +1498,11 @@ function docTotal(){
   const cost=lines.reduce((s,l)=>s+(+l.qty||0)*(+l.cost||0),0), miss=lines.some(l=>l.itemId&&!(+l.cost>0));
   $("#dProfitEst").innerHTML = lines.length ? `กำไรประมาณ <b class="${net-cost<0?"neg":"pos"}">${money(net-cost)}</b> บาท${miss?" (บางรายการยังไม่มีทุน)":""} — ไม่แสดงบนเอกสาร` : "";
 }
-function nextNo(type,date){
-  const p=({quote:"QT",receipt:"RC",credit:"DN"}[type]||"RC")+date.replace(/-/g,"").slice(2,6);
-  const max=docs.filter(d=>String(d.no).startsWith(p)).reduce((m,d)=>Math.max(m,+String(d.no).slice(p.length+1)||0),0);
-  return `${p}-${String(max+1).padStart(3,"0")}`;
+async function nextNo(type,date){
+  const p=docPrefix(type,date), floor=maxDocSeq(docs,p);
+  let n=floor+1;
+  if(store.nextSeq){ try{ n=await store.nextSeq(p,floor); }catch(e){ console.warn("doc counter failed, using local max:",e); } }
+  return formatDocNo(p,n);
 }
 fd.addEventListener("submit",async e=>{
   if(e.submitter&&e.submitter.value!=="save") return;
@@ -2364,7 +2369,7 @@ async function commitDoc(o){
       ops.push({kind:"cut",id:it.id,p,l}); it.qty=p.full; it.rem=p.keep.map(({old,...r})=>r); }
     else { if(l.qty>(+it.qty||0)) throw new Error(`${it.name} ไม่พอ เหลือ ${fmt(it.qty)} ${it.unit}`); it.qty=(+it.qty||0)-l.qty; ops.push({kind:"qty",id:it.id,l}); } } }
   const sub=sumLines(ls), discount=+o.discount||0, dateMs=new Date(o.dateStr+"T12:00").getTime(), total=Math.max(0,Math.round((sub-discount)*100)/100);
-  const v={type,no:nextNo(type,o.dateStr),date:dateMs,at:Date.now(),customer:o.customer,phone:o.phone||"",addr:o.addr||"",
+  const v={type,no:await nextNo(type,o.dateStr),date:dateMs,at:Date.now(),customer:o.customer,phone:o.phone||"",addr:o.addr||"",
     lines:ls.map(l=>({itemId:l.itemId||"",name:String(l.name).trim(),qty:+l.qty,unit:l.unit||"",price:+l.price,cost:+l.cost||(l.cut?0:(items.find(i=>i.id===l.itemId)?.cost||0)),...(l.cut?{cut:l.cut}:{})})),
     sub,discount,total,note:o.note||"",cut,showPhone:o.showPhone!==false};
   if(type==="receipt") v.via=o.via||"เงินสด";
