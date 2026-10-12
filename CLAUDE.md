@@ -11,7 +11,7 @@
 ## Stack
 - Vite + vanilla JS (ยังไม่ใช่ React ตั้งใจไม่เขียนใหม่)
 - Firebase: Firestore, Auth, Storage — ใช้ **compat SDK** (`firebase/compat/*` ใน `src/lib/firebase.js`)
-- Vercel: deploy อัตโนมัติจาก `main`, มี serverless function `api/read-doc.js` เรียก Anthropic API อ่านบิล — **ยังไม่มีใน repo** (ไม่มีโฟลเดอร์ `api/`, capability `sample` ยังไม่ถูกต่อ)
+- Vercel: deploy อัตโนมัติจาก `main`, มี serverless function `api/read-doc.js` เรียก Anthropic API (Claude Haiku 5.5) อ่านบิล — ฝั่งเว็บเรียกผ่าน capability `sample` ใน `src/lib/claude-shim.js` และต้องส่ง Firebase ID token มาด้วย
 - ไลบรารี: `xlsx` (SheetJS), `qrcode-generator`
 
 ## คำสั่งที่ใช้บ่อย
@@ -39,6 +39,16 @@
 - **สิทธิ์**: เจ้าของเห็นต้นทุน-กำไร ลูกน้องไม่เห็น ต้องบังคับที่ `firestore.rules` ด้วย ไม่ใช่แค่ซ่อนใน UI (CSS `.owner`, `isStaff()`)
 - **ข้อมูลร้าน** (ชื่อ ที่อยู่ เบอร์ เลขผู้เสียภาษี) อยู่ใน `settings/shop` ห้ามฝังค่าของลูกค้ารายใดไว้ในโค้ดหรือในพรอมต์อ่านบิล
 
+## บัญชีของลูกค้า (ตั้งค่าครั้งเดียว)
+- **GitHub**: repo นี้ให้ลูกค้าเข้าถึง แล้วลูกค้าเชื่อม GitHub ที่ claude.ai/connect-github + ติดตั้ง Claude GitHub App ให้ repo นี้ จากนั้นเปิด session ใน claude.ai/code เลือก repo นี้
+- **Firebase**: โปรเจ็กต์ของลูกค้า เปิด Firestore + Auth (อีเมล/รหัสผ่าน) + Storage แล้วเอา web config ใส่ Vercel env
+- **Anthropic API**: บัญชี Claude Console ของลูกค้า สร้าง API key แล้วใส่ Vercel env
+- **Vercel env ที่ต้องมี**
+  - `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_STORAGE_BUCKET`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_APP_ID` (ค่าสาธารณะ ถูกใส่ในหน้าเว็บ)
+  - `ANTHROPIC_API_KEY` — **ห้ามขึ้นต้นด้วย `VITE_`** ไม่งั้นหลุดไปอยู่ในหน้าเว็บ
+  - (ไม่บังคับ) `ANTHROPIC_MODEL` ถ้าจะเปลี่ยนรุ่น, `FIREBASE_PROJECT_ID` ถ้าไม่อยากให้ function อ่านจาก `VITE_FIREBASE_PROJECT_ID`
+- เปลี่ยน env แล้วต้อง **Redeploy** ค่า `VITE_*` ถึงจะเข้าไปในหน้าเว็บ
+
 ## ช่วงเดโม (ยังไม่ใช้งานจริง)
 ตอนนี้ตั้งใจเปิด `firestore.rules` ไว้ (`if true`) เพื่อให้แก้ง่าย **ห้ามใส่ข้อมูลจริงของลูกค้าจนกว่าจะทำเช็กลิสต์นี้ครบ**
 
@@ -49,7 +59,7 @@
 4. แยกต้นทุนออกจาก `items` ไป `itemCosts` (owner อ่านได้คนเดียว) และให้ shim `isOwner()` อ่านจาก role จริง
 5. บังคับเปลี่ยน PIN ค่าเริ่มต้น `8888`/`1111`
 6. ทำ `nextNo` ให้ไม่ซ้ำเมื่อหลายเครื่องออกบิลพร้อมกัน (transaction/counter)
-7. เอา Firebase config สำรองที่ฝังใน `src/lib/firebase.js` ออก ใช้ `VITE_FIREBASE_*` จาก Vercel env อย่างเดียว
+7. ~~เอา Firebase config สำรองที่ฝังใน `src/lib/firebase.js` ออก~~ ✅ ทำแล้ว — ตอนนี้ใช้ `VITE_FIREBASE_*` จาก Vercel env อย่างเดียว ถ้าไม่ตั้ง แอปจะเป็นโหมดทดลอง (เก็บในเครื่อง)
 
 ## งานแรกของ session แรก (รีวิวสถานะ)
 1. อ่าน `docs/PLAN.md` แล้วเทียบกับโค้ดจริงทีละเฟส ทำตารางสรุป ✅ ทำแล้ว / ⚠️ ทำไม่ครบ / ❌ ยังไม่ทำ พร้อมไฟล์และบรรทัดที่อ้างอิง
