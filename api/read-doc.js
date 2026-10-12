@@ -3,6 +3,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { extractJson } from "../src/lib/json.js";
+import { isApproved } from "../src/lib/approval.js";
 
 const MODEL = process.env.ANTHROPIC_MODEL || "claude-haiku-5-5";
 const MAX_IMAGES = 6;
@@ -11,7 +12,7 @@ const firebaseJwks = createRemoteJWKSet(
   new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com")
 );
 
-// ต้องล็อกอิน Firebase ของร้านนี้เท่านั้น กันคนนอกยิง API ใช้เครดิตร้าน
+// ต้องล็อกอิน Firebase ของร้านนี้ และเจ้าของร้านอนุมัติแล้ว กันคนนอกสมัครเองแล้วยิง API ใช้เครดิตร้าน
 async function verifyUser(req) {
   const projectId = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID;
   const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
@@ -21,7 +22,7 @@ async function verifyUser(req) {
       issuer: `https://securetoken.google.com/${projectId}`,
       audience: projectId,
     });
-    return payload.sub ? payload : null;
+    return payload.sub ? { uid: payload.sub, token, projectId } : null;
   } catch {
     return null;
   }
@@ -30,7 +31,9 @@ async function verifyUser(req) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ code: "method_not_allowed" });
   if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ code: "not_configured" });
-  if (!(await verifyUser(req))) return res.status(401).json({ code: "not_granted" });
+  const user = await verifyUser(req);
+  if (!user) return res.status(401).json({ code: "not_granted" });
+  if (!(await isApproved(user))) return res.status(403).json({ code: "not_granted" });
 
   const { prompt, images } = req.body || {};
   if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 60000)
