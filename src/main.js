@@ -3,6 +3,7 @@ import qrcode from "qrcode-generator";
 import "./lib/claude-shim.js";
 import { assetUrl } from "./lib/claude-shim.js";
 import { itemCostPerKg } from "./lib/cost.js";
+import { docPrefix, maxDocSeq, nextSeq, formatDocNo } from "./lib/docno.js";
 import {
   initAuth,
   subscribeAuth,
@@ -29,7 +30,7 @@ const money = n => Number(n||0).toLocaleString("th-TH",{minimumFractionDigits:2,
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 const dstr = t => new Date(t).toLocaleString("th-TH",{dateStyle:"short",timeStyle:"short"});
 const dlong = t => new Date(t).toLocaleDateString("th-TH",{year:"numeric",month:"long",day:"numeric"});
-const DEFAULT_SHOP = {name:"", phone:"", tax:"", addr:"", promptpay:"", bankName:"", bankAcc:"", bankHolder:"", billNote:"สินค้าซื้อแล้วไม่รับเปลี่ยนหรือคืน · โปรดตรวจนับสินค้าก่อนรับมอบ", ownerPin:"8888", staffPin:"1111", slipWidth:"80mm", defaultPrint:"slip", autoPrintQuick:false, showPromptpaySlip:true, showBankSlip:true};
+const DEFAULT_SHOP = {name:"", phone:"", tax:"", addr:"", promptpay:"", bankName:"", bankAcc:"", bankHolder:"", billNote:"สินค้าซื้อแล้วไม่รับเปลี่ยนหรือคืน · โปรดตรวจนับสินค้าก่อนรับมอบ", slipWidth:"80mm", defaultPrint:"slip", autoPrintQuick:false, showPromptpaySlip:true, showBankSlip:true};
 
 let items=[], moves=[], buys=[], docs=[], cash=[], shop={...DEFAULT_SHOP};
 let cat="ทั้งหมด", docFilter="ทั้งหมด", buyFilter="ทั้งหมด", tab="stock", current=null, store, downloads=null, assets=null, sample=null, sampleImg=false;
@@ -55,11 +56,32 @@ function localStore(){
 function dbStore(db){
   return { mode:"db",
     sub(c,o,cb){ let q=db.collection(c); if(o.order) q=q.orderBy(o.order,"desc"); if(o.limit) q=q.limit(o.limit);
-      q.onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()}))), onDbErr); },
-    set:(p,v)=>db.doc(p).set(v), update:(p,v)=>db.doc(p).update(v), del:p=>db.doc(p).delete() };
+      return q.onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()}))), onDbErr); },
+    set:(p,v)=>db.doc(p).set(v), update:(p,v)=>db.doc(p).update(v), del:p=>db.doc(p).delete(),
+    // จองเลขเอกสารแบบ transaction กันเลขซ้ำเมื่อหลายเครื่องออกบิลพร้อมกัน
+    nextSeq:(key,floor)=>db.runTransaction(async t=>{ const ref=db.doc("counters/"+key), s=await t.get(ref);
+      const n=nextSeq(s.exists?s.data().last:0,floor); t.set(ref,{last:n,at:Date.now()}); return n; }) };
 }
 function onDbErr(e){ toast("ฐานข้อมูลขัดข้อง: "+(e&&e.code||"ไม่ทราบสาเหตุ")); }
 const addMove = m => store.set("moves/"+uid(), m);
+
+/* Firestore listeners start only after login + approval (rules deny everything else) */
+let unsubs=[];
+function startSubs(){
+  if(unsubs.length) return;
+  const sub=(c,o,cb)=>{ const u=store.sub(c,o,cb); unsubs.push(typeof u==="function"?u:()=>{}); };
+  sub("items",{},v=>{items=v;render();renderProfit();});
+  sub("moves",{order:"at",limit:600},v=>{moves=v;renderLog();});
+  sub("buys",{order:"at",limit:1000},v=>{buys=v;renderBuys();renderProfit();renderCash();renderAlerts();});
+  sub("docs",{order:"at",limit:1000},v=>{docs=v;renderDocs();renderProfit();renderCash();renderAlerts();if(moneyView==="report")renderReport();});
+  sub("closes",{order:"at",limit:120},v=>{closes=v.map(c=>({...c,date:c.date||c.id}));if(moneyView==="close"&&!$("#tab-close").hidden&&document.activeElement?.closest?.("#closeBody")==null)renderClose();});
+  sub("prices",{order:"at",limit:30},v=>{priceHist=v;});
+  sub("orders",{order:"at",limit:500},v=>{orders=v;renderDocs();});
+  sub("customers",{},v=>{customers=v;fillCustList();if(docFilter==="ลูกค้า")renderCustDir();});
+  sub("cash",{order:"at",limit:2000},v=>{cash=v;renderCash();renderProfit();});
+  sub("settings",{},v=>{ const s=v.find(x=>x.id==="shop"); shop={...DEFAULT_SHOP,...(s||{})}; const g=v.find(x=>x.id==="scrap"); grades=g&&Array.isArray(g.grades)?g.grades:[]; $("#shopTitle").textContent = shop.name ? `คลังเหล็ก · ${shop.name}` : "คลังเหล็ก"; });
+}
+function stopSubs(){ unsubs.forEach(u=>{ try{u();}catch(e){} }); unsubs=[]; }
 
 async function init(){
   render();
@@ -70,16 +92,7 @@ async function init(){
   try{ if(window.claude&&claude.use){ userCap=await claude.use("user"); if(userCap){ try{ me=await userCap.id(); }catch(e){} } } }catch(e){}
   applyRole();
   $("#mode").innerHTML = db ? "<b>●</b> ออนไลน์" : "โหมดทดลอง"; $("#mode").title = db ? "ฐานข้อมูลออนไลน์ ซิงก์ทุกเครื่อง" : "บันทึกเฉพาะเครื่องนี้";
-  store.sub("items",{},v=>{items=v;render();renderProfit();});
-  store.sub("moves",{order:"at",limit:600},v=>{moves=v;renderLog();});
-  store.sub("buys",{order:"at",limit:1000},v=>{buys=v;renderBuys();renderProfit();renderCash();renderAlerts();});
-  store.sub("docs",{order:"at",limit:1000},v=>{docs=v;renderDocs();renderProfit();renderCash();renderAlerts();if(moneyView==="report")renderReport();});
-  store.sub("closes",{order:"at",limit:120},v=>{closes=v.map(c=>({...c,date:c.date||c.id}));if(moneyView==="close"&&!$("#tab-close").hidden&&document.activeElement?.closest?.("#closeBody")==null)renderClose();});
-  store.sub("prices",{order:"at",limit:30},v=>{priceHist=v;});
-  store.sub("orders",{order:"at",limit:500},v=>{orders=v;renderDocs();});
-  store.sub("customers",{},v=>{customers=v;fillCustList();if(docFilter==="ลูกค้า")renderCustDir();});
-  store.sub("cash",{order:"at",limit:2000},v=>{cash=v;renderCash();renderProfit();});
-  store.sub("settings",{},v=>{ const s=v.find(x=>x.id==="shop"); shop={...DEFAULT_SHOP,...(s||{})}; const g=v.find(x=>x.id==="scrap"); grades=g&&Array.isArray(g.grades)?g.grades:[]; $("#shopTitle").textContent = shop.name ? `คลังเหล็ก · ${shop.name}` : "คลังเหล็ก"; });
+  if(store.mode==="local") startSubs();
   try{ if(window.claude&&claude.use) downloads=await claude.use("downloads"); }catch(e){}
   $("#xlsBtn").hidden = !downloads; $("#vSave").hidden = !downloads;
   try{ assets=await claude.use("assets"); }catch(e){}
@@ -1485,10 +1498,11 @@ function docTotal(){
   const cost=lines.reduce((s,l)=>s+(+l.qty||0)*(+l.cost||0),0), miss=lines.some(l=>l.itemId&&!(+l.cost>0));
   $("#dProfitEst").innerHTML = lines.length ? `กำไรประมาณ <b class="${net-cost<0?"neg":"pos"}">${money(net-cost)}</b> บาท${miss?" (บางรายการยังไม่มีทุน)":""} — ไม่แสดงบนเอกสาร` : "";
 }
-function nextNo(type,date){
-  const p=({quote:"QT",receipt:"RC",credit:"DN"}[type]||"RC")+date.replace(/-/g,"").slice(2,6);
-  const max=docs.filter(d=>String(d.no).startsWith(p)).reduce((m,d)=>Math.max(m,+String(d.no).slice(p.length+1)||0),0);
-  return `${p}-${String(max+1).padStart(3,"0")}`;
+async function nextNo(type,date){
+  const p=docPrefix(type,date), floor=maxDocSeq(docs,p);
+  let n=floor+1;
+  if(store.nextSeq){ try{ n=await store.nextSeq(p,floor); }catch(e){ console.warn("doc counter failed, using local max:",e); } }
+  return formatDocNo(p,n);
 }
 fd.addEventListener("submit",async e=>{
   if(e.submitter&&e.submitter.value!=="save") return;
@@ -1872,6 +1886,7 @@ function handleAuthStateChange(auth){
   if(auth.loading) return;
 
   if(!auth.user){
+    if(store?.mode==="db") stopSubs();
     // User signed out -> open Auth modal
     if(!$("#dAuth").open) $("#dAuth").showModal();
     if($("#dPending")?.open) $("#dPending").close();
@@ -1896,6 +1911,7 @@ function handleAuthStateChange(auth){
 
   const profile = auth.profile;
   if(!profile || profile.status === "pending"){
+    if(store?.mode==="db") stopSubs();
     // User is awaiting approval
     if($("#dUsers")?.open) $("#dUsers").close();
     if($("#dUserMenu")?.open) $("#dUserMenu").close();
@@ -1912,6 +1928,7 @@ function handleAuthStateChange(auth){
   }
 
   if(profile.status === "disabled"){
+    if(store?.mode==="db") stopSubs();
     if($("#dPending")?.open) $("#dPending").close();
     alert("บัญชีของคุณถูกระงับสิทธิ์การใช้งาน กรุณาติดต่อเจ้าของร้าน");
     logoutUser();
@@ -1937,6 +1954,7 @@ function handleAuthStateChange(auth){
   const sbAvatar = $("#sidebarAvatar"); if(sbAvatar) sbAvatar.textContent = realOwner ? "👑" : "👤";
 
   applyRole();
+  if(store) startSubs();
   render();
   renderProfit();
 }
@@ -2351,7 +2369,7 @@ async function commitDoc(o){
       ops.push({kind:"cut",id:it.id,p,l}); it.qty=p.full; it.rem=p.keep.map(({old,...r})=>r); }
     else { if(l.qty>(+it.qty||0)) throw new Error(`${it.name} ไม่พอ เหลือ ${fmt(it.qty)} ${it.unit}`); it.qty=(+it.qty||0)-l.qty; ops.push({kind:"qty",id:it.id,l}); } } }
   const sub=sumLines(ls), discount=+o.discount||0, dateMs=new Date(o.dateStr+"T12:00").getTime(), total=Math.max(0,Math.round((sub-discount)*100)/100);
-  const v={type,no:nextNo(type,o.dateStr),date:dateMs,at:Date.now(),customer:o.customer,phone:o.phone||"",addr:o.addr||"",
+  const v={type,no:await nextNo(type,o.dateStr),date:dateMs,at:Date.now(),customer:o.customer,phone:o.phone||"",addr:o.addr||"",
     lines:ls.map(l=>({itemId:l.itemId||"",name:String(l.name).trim(),qty:+l.qty,unit:l.unit||"",price:+l.price,cost:+l.cost||(l.cut?0:(items.find(i=>i.id===l.itemId)?.cost||0)),...(l.cut?{cut:l.cut}:{})})),
     sub,discount,total,note:o.note||"",cut,showPhone:o.showPhone!==false};
   if(type==="receipt") v.via=o.via||"เงินสด";
@@ -2980,8 +2998,6 @@ fs.addEventListener("submit",async e=>{
   v.autoPrintQuick = !!fs.autoPrintQuick?.checked;
   v.showPromptpaySlip = !!fs.showPromptpaySlip?.checked;
   v.showBankSlip = !!fs.showBankSlip?.checked;
-  if(!v.ownerPin) v.ownerPin = "8888";
-  if(!v.staffPin) v.staffPin = "1111";
   try{
     await store.set("settings/shop",v);
     shop={...DEFAULT_SHOP,...v};
