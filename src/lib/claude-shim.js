@@ -1,4 +1,5 @@
 import { getDb, getAuth, getStorage } from "./firebase.js";
+import { getAuthState } from "./auth.js";
 
 // In-memory or localStorage cache for local assets fallback
 const localAssetCache = new Map();
@@ -44,7 +45,7 @@ const downloadsShim = {
 };
 
 const userShim = {
-  isOwner: () => true, // สิทธิ์เจ้าของสำหรับทั้งสองคน
+  isOwner: () => getAuthState().profile?.role === "owner" && getAuthState().profile?.status === "approved",
   id: () => {
     const auth = getAuth();
     return auth?.currentUser?.uid || "owner-1";
