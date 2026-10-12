@@ -3,7 +3,10 @@ import qrcode from "qrcode-generator";
 import "./lib/claude-shim.js";
 import { assetUrl } from "./lib/claude-shim.js";
 import { itemCostPerKg } from "./lib/cost.js";
-import { docPrefix, maxDocSeq, nextSeq, formatDocNo } from "./lib/docno.js";
+import { docPrefix, maxDocSeq, formatDocNo } from "./lib/docno.js";
+import { localStore, dbStore } from "./lib/store.js";
+import { lineCost } from "./lib/item-costs.js";
+import { firebase } from "./lib/firebase.js";
 import {
   initAuth,
   subscribeAuth,
@@ -28,6 +31,8 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt
 const fmt = n => Number(n||0).toLocaleString("th-TH",{maximumFractionDigits:2});
 const money = n => Number(n||0).toLocaleString("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2});
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const round2 = n => Math.round(n*100)/100;
+const userErr = m => Object.assign(new Error(m),{user:true}); // ข้อความที่แสดงให้ผู้ใช้เห็นได้
 const dstr = t => new Date(t).toLocaleString("th-TH",{dateStyle:"short",timeStyle:"short"});
 const dlong = t => new Date(t).toLocaleDateString("th-TH",{year:"numeric",month:"long",day:"numeric"});
 const DEFAULT_SHOP = {name:"", phone:"", tax:"", addr:"", promptpay:"", bankName:"", bankAcc:"", bankHolder:"", billNote:"สินค้าซื้อแล้วไม่รับเปลี่ยนหรือคืน · โปรดตรวจนับสินค้าก่อนรับมอบ", slipWidth:"80mm", defaultPrint:"slip", autoPrintQuick:false, showPromptpaySlip:true, showBankSlip:true};
@@ -35,33 +40,7 @@ const DEFAULT_SHOP = {name:"", phone:"", tax:"", addr:"", promptpay:"", bankName
 let items=[], moves=[], buys=[], docs=[], cash=[], shop={...DEFAULT_SHOP};
 let cat="ทั้งหมด", docFilter="ทั้งหมด", buyFilter="ทั้งหมด", tab="stock", current=null, store, downloads=null, assets=null, sample=null, sampleImg=false;
 
-/* ---------- storage: shared db when published, local demo otherwise ---------- */
-function localStore(){
-  const KEY="steel-stock-demo";
-  let data={items:{},moves:{},buys:{},docs:{},cash:{},settings:{},closes:{},counts:{},prices:{},orders:{},customers:{}};
-  try{ const raw=localStorage.getItem(KEY); if(raw){ const d=JSON.parse(raw);
-    if(Array.isArray(d.moves)){ const m={}; d.moves.forEach(x=>m[x.id||uid()]=x); d.moves=m; }
-    data={...data,...d}; } }catch(e){}
-  const subs=[];
-  const list=(c,o)=>{ let a=Object.entries(data[c]||{}).map(([id,v])=>({id,...v}));
-    if(o.order) a.sort((x,y)=>(y[o.order]||0)-(x[o.order]||0)); if(o.limit) a=a.slice(0,o.limit); return a; };
-  const save=()=>{ try{localStorage.setItem(KEY,JSON.stringify(data));}catch(e){} subs.forEach(s=>s.cb(list(s.c,s.o))); };
-  const split=p=>p.split("/");
-  return { mode:"local",
-    sub(c,o,cb){ subs.push({c,o,cb}); cb(list(c,o)); },
-    async set(p,v){ const [c,id]=split(p); (data[c]=data[c]||{})[id]=v; save(); },
-    async update(p,v){ const [c,id]=split(p); Object.assign(data[c][id],v); save(); },
-    async del(p){ const [c,id]=split(p); delete data[c][id]; save(); } };
-}
-function dbStore(db){
-  return { mode:"db",
-    sub(c,o,cb){ let q=db.collection(c); if(o.order) q=q.orderBy(o.order,"desc"); if(o.limit) q=q.limit(o.limit);
-      return q.onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()}))), onDbErr); },
-    set:(p,v)=>db.doc(p).set(v), update:(p,v)=>db.doc(p).update(v), del:p=>db.doc(p).delete(),
-    // จองเลขเอกสารแบบ transaction กันเลขซ้ำเมื่อหลายเครื่องออกบิลพร้อมกัน
-    nextSeq:(key,floor)=>db.runTransaction(async t=>{ const ref=db.doc("counters/"+key), s=await t.get(ref);
-      const n=nextSeq(s.exists?s.data().last:0,floor); t.set(ref,{last:n,at:Date.now()}); return n; }) };
-}
+/* ---------- storage: shared db when published, local demo otherwise (src/lib/store.js) ---------- */
 function onDbErr(e){ toast("ฐานข้อมูลขัดข้อง: "+(e&&e.code||"ไม่ทราบสาเหตุ")); }
 const addMove = m => store.set("moves/"+uid(), m);
 
@@ -87,7 +66,8 @@ async function init(){
   render();
   let db=null;
   try{ if(window.claude&&claude.use) db=await claude.use("db"); }catch(e){}
-  store = db ? dbStore(db) : localStore(); wrapAudit();
+  const audit=(p,v)=> me&&AUDIT.test(p)&&v&&!v.by ? {...v,by:me} : v;
+  store = db ? dbStore(db,{FieldValue:firebase.firestore.FieldValue,onErr:onDbErr,audit,isOwner:()=>realOwner}) : localStore({audit,newId:uid});
   checkLocalDemoMigration();
   try{ if(window.claude&&claude.use){ userCap=await claude.use("user"); if(userCap){ try{ me=await userCap.id(); }catch(e){} } } }catch(e){}
   applyRole();
@@ -349,14 +329,19 @@ $("#mIn").addEventListener("click",()=>move("in"));
 $("#mOut").addEventListener("click",()=>move("out"));
 $("#mEdit").addEventListener("click",()=>{ $("#dMove").close(); openEdit(current); });
 async function move(type){
-  const n=+$("#mAmt").value; if(!(n>0)) return toast("ใส่จำนวนมากกว่า 0");
-  const cur=+current.qty||0;
-  if(type==="out"&&n>cur) return toast(`ของไม่พอ เหลือ ${fmt(cur)} ${current.unit}`);
+  const n=round2(+$("#mAmt").value); if(!(n>0)) return toast("ใส่จำนวนมากกว่า 0");
+  if(type==="out"&&n>round2(+current.qty||0)) return toast(`ของไม่พอ เหลือ ${fmt(current.qty)} ${current.unit}`);
   try{
-    await store.update("items/"+current.id,{qty:type==="in"?cur+n:cur-n,updatedAt:Date.now()});
-    await addMove({type,qty:n,itemId:current.id,name:current.name,note:$("#mNote").value.trim(),at:Date.now()});
+    // อ่านจำนวนล่าสุดใน transaction กันสองเครื่องเขียนทับกัน
+    await store.run(async tx=>{
+      const it=await tx.get("items/"+current.id); if(!it) throw userErr("ไม่พบสินค้านี้แล้ว");
+      const cur=round2(+it.qty||0);
+      if(type==="out"&&n>cur) throw userErr(`ของไม่พอ เหลือ ${fmt(cur)} ${it.unit}`);
+      tx.update("items/"+current.id,{qty:round2(type==="in"?cur+n:cur-n),updatedAt:Date.now()});
+      tx.set("moves/"+uid(),{type,qty:n,itemId:current.id,name:current.name,note:$("#mNote").value.trim(),at:Date.now()});
+    });
     $("#dMove").close(); toast(type==="in"?`รับเข้า ${fmt(n)} ${current.unit}`:`จ่ายออก ${fmt(n)} ${current.unit}`);
-  }catch(e){ toast("บันทึกไม่สำเร็จ ลองอีกครั้ง"); }
+  }catch(e){ toast(e&&e.user?e.message:"บันทึกไม่สำเร็จ ลองอีกครั้ง"); }
 }
 
 /* ---------- item edit ---------- */
@@ -878,11 +863,13 @@ fr.addEventListener("submit",async e=>{
         if(l.target==="new"){
           itemId=uid();
           await store.set("items/"+itemId,{name:l.name.trim(),cat:l.cat,cond:kind==="used"?"used":"new",spec:l.spec.trim(),qty:l.qty,unit:l.unit||"เส้น",
-            kg:kgPer,min:0,cost,price:l.sell||0,loc:"",updatedAt:at});
+            kg:kgPer,min:0,price:l.sell||0,loc:"",updatedAt:at});
+          await store.costIn(itemId,{oq:0,a:l.qty,c:cost,at});
         }else{
           const it=items.find(i=>i.id===l.target); if(it){ itemId=it.id;
-            const oq=+it.qty||0, oc=+it.cost||0, nq=oq+l.qty, nc=Math.round((oq>0&&oc>0?(oq*oc+cost*l.qty)/nq:cost)*100)/100;
-            await store.update("items/"+it.id,{qty:nq,cost:nc,kg:kgPer||+it.kg||0,price:l.sell||+it.price||0,updatedAt:at}); }
+            // จำนวนบวกเพิ่มแบบ increment (ไม่ทับเครื่องอื่น) ทุนเฉลี่ยคำนวณจาก itemCosts (ดู src/lib/item-costs.js)
+            await store.update("items/"+it.id,{qty:store.inc(l.qty),kg:kgPer||+it.kg||0,price:l.sell||+it.price||0,updatedAt:at});
+            await store.costIn(it.id,{oq:+it.qty||0,a:l.qty,c:cost,at}); }
         }
         addQty=l.qty;
         await addMove({type:"in",qty:l.qty,itemId,name:l.name.trim(),note:`${kind==="used"?"รับซื้อเก่า":"ซื้อใหม่"}จาก ${v.seller}${v.billNo?" บิล "+v.billNo:""}`,at});
@@ -926,7 +913,11 @@ fb.addEventListener("submit",async e=>{
     if(editingBuy){
       const keep=legacyLines(editingBuy);
       v.lines=ls.map((l,i)=>({...(keep[i]||{}),...l,itemId:keep[i]?.itemId||l.itemId||"",addQty:keep[i]?.addQty??l.addQty,cat:l.cat||keep[i]?.cat||""}));
-      const {id:_old,...prev}=editingBuy; await store.set("buys/"+editingBuy.id,{...prev,...v,at:editingBuy.at||Date.now(),photoId:v.photoId||editingBuy.photoId||"",photoIds:v.photoIds||editingBuy.photoIds||[]});
+      // อ่านบิลล่าสุดก่อนเขียน ไม่ให้รายการจ่ายหนี้ที่เครื่องอื่นเพิ่งบันทึกหายไป
+      await store.run(async tx=>{ const cur=await tx.get("buys/"+editingBuy.id), {id:_old,...prev}=cur||editingBuy;
+        const out={...prev,...v,at:editingBuy.at||Date.now(),photoId:v.photoId||editingBuy.photoId||"",photoIds:v.photoIds||editingBuy.photoIds||[]};
+        if(prev.payStatus==="credit"&&v.payStatus==="credit") out.payments=prev.payments||[];
+        tx.set("buys/"+editingBuy.id,out); });
     }else{
       v.at=Date.now(); const local={};
       for(const l of ls){
@@ -959,10 +950,9 @@ fb.addEventListener("submit",async e=>{
         const calcKg = l.kgPer || 0;
 
         if(it){
-          const oq=+it.qty||0, oc=+it.cost||0, nq=oq+l.addQty;
-          const newCost=Math.round((oq>0&&oc>0 ? (oq*oc+lineTotal)/nq : (l.addQty>0 ? lineTotal/l.addQty : oc))*100)/100;
-          it.qty=nq; it.cost=newCost; if(l.cat) it.cat=l.cat;
-          const updates={qty:nq,cost:newCost,cat:it.cat,updatedAt:Date.now()};
+          const oq=+it.qty||0, nq=oq+l.addQty;
+          it.qty=nq; if(l.cat) it.cat=l.cat;
+          const updates={qty:store.inc(l.addQty),cat:it.cat,updatedAt:Date.now()};
           if(l.addQty>0 && it.unit==="กก." && targetUnit!=="กก."){
             it.unit=targetUnit; updates.unit=targetUnit;
           }
@@ -971,10 +961,10 @@ fb.addEventListener("submit",async e=>{
           }
           local[it.id]=it; l.itemId=it.id;
           await store.update("items/"+it.id,updates);
+          await store.costIn(it.id,{oq,a:l.addQty,c:lineTotal/l.addQty,at:Date.now()});
           await addMove({type:"in",qty:l.addQty,itemId:it.id,name:it.name,note:`${kind==="used"?"รับซื้อเก่า":"ซื้อใหม่"}จาก ${v.seller}${v.billNo?" บิล "+v.billNo:""}`,at:v.at});
         }else{
           const newId=uid();
-          const cost=l.addQty>0 ? Math.round((lineTotal/l.addQty)*100)/100 : (l.price||0);
           const newItem={
             id:newId,
             name:l.desc.trim(),
@@ -985,7 +975,6 @@ fb.addEventListener("submit",async e=>{
             unit:targetUnit,
             kg:calcKg,
             min:0,
-            cost:cost,
             price:0,
             loc:"",
             rem:[],
@@ -994,6 +983,7 @@ fb.addEventListener("submit",async e=>{
           local[newId]=newItem; l.itemId=newId;
           const {id:_ignore,...itemDoc}=newItem;
           await store.set("items/"+newId,itemDoc);
+          await store.costIn(newId,{oq:0,a:l.addQty,c:lineTotal/l.addQty,at:Date.now()});
           await addMove({type:"in",qty:l.addQty,itemId:newId,name:newItem.name,note:`${kind==="used"?"รับซื้อเก่า":"ซื้อใหม่"}จาก ${v.seller}${v.billNo?" บิล "+v.billNo:""}`,at:v.at});
         }
       }
@@ -1120,7 +1110,7 @@ function renderProfit(){
   const rc=docs.filter(d=>(d.type==="receipt"||d.type==="credit")&&inR(d.date||d.at));
   const sales=rc.reduce((s,d)=>s+(+d.total||0),0);
   let cogs=0, noCost=0;
-  rc.forEach(d=>d.lines.forEach(l=>{ if(l.itemId){ if(+l.cost>0) cogs+=l.qty*l.cost; else noCost++; } }));
+  rc.forEach(d=>d.lines.forEach(l=>{ if(l.itemId){ const c=lineCost(l,items.find(i=>i.id===l.itemId)); if(c>0) cogs+=l.qty*c; else noCost++; } }));
   const opex=cash.filter(c=>c.type==="out"&&inR(c.date||c.at)).reduce((s,c)=>s+(+c.amount||0),0), oinc=cash.filter(c=>c.type==="in"&&inR(c.date||c.at)).reduce((s,c)=>s+(+c.amount||0)-(+c.cogs||0),0);
   const gp=sales-cogs, bought=buys.filter(x=>inR(x.date||x.at)).reduce((s,x)=>s+(+x.total||0),0);
   const stCost=items.reduce((s,i)=>s+itemVal(i,"cost"),0), stSell=items.filter(i=>+i.cost>0).reduce((s,i)=>s+itemVal(i),0);
@@ -1297,18 +1287,41 @@ function planCut(item,spec,n,useOld=true){
   const keep=[], scrap=[]; pool.forEach(r=>(Math.min(r.w,r.l)<cutCfg.minMm?scrap:keep).push(r));
   return {mode,full,fullUsed,keep,scrap,steps,ratio:(w*l)/(W*L),scrapRatio:scrap.reduce((s,r)=>s+r.w*r.l/(W*L),0)};
 }
-// write plan to stock
-async function applyCut(item,plan,n,label,note,at){
-  await store.update("items/"+item.id,{qty:plan.full,rem:plan.keep.map(({old,...r})=>r),updatedAt:at});
-  await addMove({type:"out",qty:n,label:`−${fmt(n)} ${label}`,itemId:item.id,name:item.name,
+/* ---------- stock writes in a transaction ----------
+   อ่านสินค้าล่าสุดก่อน แล้วเขียนทุกอย่างตอนท้ายทีเดียว (Firestore ต้องอ่านให้หมดก่อนเขียน)
+   ถ้ามีอะไรผิดพลาดกลางทาง จะไม่มีอะไรถูกเขียนเลย */
+const SCRAP_NAME="เศษเหล็ก (จากการตัด)";
+const cutSpecOf=c=> c.mode==="area" ? {w:c.w,l:c.l} : {x:c.x};
+function stockTx(tx){
+  const st={}, touched=new Set(), remTouched=new Set(), created=new Set(), moves=[];
+  return {
+    async load(id){ if(!(id in st)) st[id]=await tx.get("items/"+id); return st[id]; },
+    async loadScrap(){ const s=items.find(i=>i.unit==="กก."&&/เศษ/.test(i.name)); const f=s&&await this.load(s.id); if(f) return f;
+      const ex=Object.values(st).find(x=>x&&created.has(x.id)); if(ex) return ex;
+      const id=uid(); created.add(id); return st[id]={id,name:SCRAP_NAME,cat:"อื่นๆ",cond:"used",spec:"",qty:0,unit:"กก.",kg:1,min:0,price:0,loc:""}; },
+    out(it,n){ const cur=round2(+it.qty||0); if(n>cur) throw userErr(`${it.name} ไม่พอ เหลือ ${fmt(cur)} ${it.unit}`); it.qty=round2(cur-n); touched.add(it.id); },
+    cut(it,plan){ it.qty=plan.full; it.rem=plan.keep.map(({old,...r})=>r); touched.add(it.id); remTouched.add(it.id); },
+    add(it,n){ it.qty=round2((+it.qty||0)+n); touched.add(it.id); },
+    move(m){ moves.push(m); },
+    flush(at){
+      touched.forEach(id=>{ const {id:_x,...it}=st[id];
+        if(created.has(id)) tx.set("items/"+id,{...it,updatedAt:at});
+        else tx.update("items/"+id,{qty:it.qty,...(remTouched.has(id)?{rem:it.rem}:{}),updatedAt:at}); });
+      moves.forEach(m=>tx.set("moves/"+uid(),m));
+    }
+  };
+}
+async function cutApply(stk,it,spec,n,useOld,label,note,at){
+  const plan=planCut(it,spec,n,useOld); if(plan.error) throw userErr(`${it.name}: ${plan.error}`);
+  stk.cut(it,plan);
+  stk.move({type:"out",qty:n,label:`−${fmt(n)} ${label}`,itemId:it.id,name:it.name,
     note:`${note}${plan.fullUsed?` · ใช้${plan.mode==="area"?"แผ่น":"เส้น"}เต็ม ${plan.fullUsed}`:""}`,at});
-  const sk=plan.scrapRatio*(+item.kg||0);
+  const sk=plan.scrapRatio*(+it.kg||0);
   if(sk>0.01){
-    let s=items.find(i=>i.unit==="กก."&&/เศษ/.test(i.name));
-    if(s) await store.update("items/"+s.id,{qty:Math.round(((+s.qty||0)+sk)*100)/100,updatedAt:at});
-    else { const sid=uid(); await store.set("items/"+sid,{name:"เศษเหล็ก (จากการตัด)",cat:"อื่นๆ",cond:"used",spec:"",qty:Math.round(sk*100)/100,unit:"กก.",kg:1,min:0,cost:0,price:0,loc:"",updatedAt:at}); }
-    await addMove({type:"in",qty:Math.round(sk*100)/100,label:`+${fmt(Math.round(sk*100)/100)} กก.`,itemId:"",name:"เศษเหล็ก (จากการตัด)",note:`เศษจากตัด ${item.name}`,at});
+    const sc=await stk.loadScrap(); stk.add(sc,sk);
+    stk.move({type:"in",qty:round2(sk),label:`+${fmt(round2(sk))} กก.`,itemId:"",name:SCRAP_NAME,note:`เศษจากตัด ${it.name}`,at});
   }
+  return plan;
 }
 
 /* ---------- cut sheet UI ---------- */
@@ -1355,15 +1368,17 @@ $("#kClose").addEventListener("click",()=>$("#dCut").close());
 function cutLine(){
   const p=cutPlan, it=cutItem, lab=cutLabel(p.spec);
   return {itemId:it.id,name:`${it.name}${it.spec?" "+it.spec:""} ตัด ${lab}`,qty:p.n,unit:cutMode(it)==="area"?"ชิ้น":"ท่อน",price:p.pricePiece,cost:p.costPiece,
-    cut:{mode:p.mode,x:p.spec.x||0,w:p.spec.w||0,l:p.spec.l||0,useOld:$("#kOld").checked,label:lab}};
+    cut:{mode:p.mode,x:p.spec.x||0,w:p.spec.w||0,l:p.spec.l||0,useOld:$("#kOld").checked,label:lab,ratio:p.ratio}};
 }
 $("#kStock").addEventListener("click",async()=>{
   if(!cutPlan||cutPlan.error) return toast("ตรวจขนาดที่ตัดก่อน");
   const b=$("#kStock"); b.disabled=true;
-  try{ const at=Date.now(), lab=cutLabel(cutPlan.spec);
-    await applyCut(cutItem,cutPlan,cutPlan.n,`${cutPlan.mode==="area"?"ชิ้น":"ท่อน"} ${lab}`,`แบ่งขาย ${fmt(cutPlan.n)} × ${lab} · ${money(cutPlan.pricePiece*cutPlan.n)} บาท${$("#kNote").value.trim()?" · "+$("#kNote").value.trim():""}`,at);
-    $("#dCut").close(); $("#dMove").close(); toast(`ตัดสต็อกแล้ว ${fmt(cutPlan.n)} × ${lab}`);
-  }catch(e){ toast("บันทึกไม่สำเร็จ ลองอีกครั้ง"); } finally{ b.disabled=false; }
+  try{ const at=Date.now(), lab=cutLabel(cutPlan.spec), p=cutPlan, id=cutItem.id, useOld=$("#kOld").checked;
+    const label=`${p.mode==="area"?"ชิ้น":"ท่อน"} ${lab}`, note=`แบ่งขาย ${fmt(p.n)} × ${lab} · ${money(p.pricePiece*p.n)} บาท${$("#kNote").value.trim()?" · "+$("#kNote").value.trim():""}`;
+    await store.run(async tx=>{ const stk=stockTx(tx), it=await stk.load(id); if(!it) throw userErr("ไม่พบสินค้านี้แล้ว");
+      await cutApply(stk,it,p.spec,p.n,useOld,label,note,at); stk.flush(at); });
+    $("#dCut").close(); $("#dMove").close(); toast(`ตัดสต็อกแล้ว ${fmt(p.n)} × ${lab}`);
+  }catch(e){ toast(e&&e.user?e.message:"บันทึกไม่สำเร็จ ลองอีกครั้ง"); } finally{ b.disabled=false; }
 });
 $("#kToDoc").addEventListener("click",()=>{
   if(!cutPlan||cutPlan.error) return toast("ตรวจขนาดที่ตัดก่อน");
@@ -1744,9 +1759,8 @@ $("#vPay").addEventListener("click", () => {
     info: `${d.customer} · คงค้าง ${money(docOwed(d))} บาท`,
     amount: docOwed(d),
     onSave: async p => {
-      const payments = [...(d.payments || []), p];
-      await store.update("docs/" + d.id, {payments});
-      openView({...d, payments}, viewingFormat);
+      await store.update("docs/" + d.id, {payments: store.push(p)}); // ต่อท้าย ไม่ทับรายการที่เครื่องอื่นบันทึก
+      openView({...d, payments: [...(d.payments || []), p]}, viewingFormat);
     }
   });
 });
@@ -2320,7 +2334,6 @@ function nameOf(id){
 }
 const byTxt=o=>{ const n=nameOf(o&&o.by); return n?` · โดย ${n}`:""; };
 const AUDIT=/^(docs|buys|cash|moves|closes|counts|prices|orders|customers)\//;
-function wrapAudit(){ const s=store.set.bind(store); store.set=(p,v)=> s(p, me&&AUDIT.test(p)&&v&&!v.by ? {...v,by:me} : v); }
 
 /* payments */
 const sumPay=a=>(Array.isArray(a)?a:[]).reduce((s,p)=>s+(+p.amount||0),0);
@@ -2365,24 +2378,31 @@ async function commitDoc(o){
   if(cut){ for(const l of ls){ const base=items.find(i=>i.id===l.itemId); if(!base) continue;
     const it=sim[base.id]||(sim[base.id]={...base,rem:remOf(base).map(r=>({...r}))});
     if(l.cut){ const spec=l.cut.mode==="area"?{w:l.cut.w,l:l.cut.l}:{x:l.cut.x}; const p=planCut(it,spec,l.qty,l.cut.useOld!==false);
-      if(p.error) throw new Error(`${it.name}: ${p.error}`);
+      if(p.error) throw userErr(`${it.name}: ${p.error}`);
       ops.push({kind:"cut",id:it.id,p,l}); it.qty=p.full; it.rem=p.keep.map(({old,...r})=>r); }
-    else { if(l.qty>(+it.qty||0)) throw new Error(`${it.name} ไม่พอ เหลือ ${fmt(it.qty)} ${it.unit}`); it.qty=(+it.qty||0)-l.qty; ops.push({kind:"qty",id:it.id,l}); } } }
+    else { if(l.qty>round2(+it.qty||0)) throw userErr(`${it.name} ไม่พอ เหลือ ${fmt(it.qty)} ${it.unit}`); it.qty=round2((+it.qty||0)-l.qty); ops.push({kind:"qty",id:it.id,l}); } } }
   const sub=sumLines(ls), discount=+o.discount||0, dateMs=new Date(o.dateStr+"T12:00").getTime(), total=Math.max(0,Math.round((sub-discount)*100)/100);
   const v={type,no:await nextNo(type,o.dateStr),date:dateMs,at:Date.now(),customer:o.customer,phone:o.phone||"",addr:o.addr||"",
-    lines:ls.map(l=>({itemId:l.itemId||"",name:String(l.name).trim(),qty:+l.qty,unit:l.unit||"",price:+l.price,cost:+l.cost||(l.cut?0:(items.find(i=>i.id===l.itemId)?.cost||0)),...(l.cut?{cut:l.cut}:{})})),
+    lines:ls.map(l=>{ const c=+l.cost||(l.cut?0:(+items.find(i=>i.id===l.itemId)?.cost||0));
+      // ลูกน้องไม่เห็นทุน: ทำเครื่องหมายไว้ ให้รายงานกำไรของเจ้าของใช้ทุนปัจจุบันของสินค้าแทน
+      return {itemId:l.itemId||"",name:String(l.name).trim(),qty:+l.qty,unit:l.unit||"",price:+l.price,cost:c,...(l.cut?{cut:l.cut}:{}),...(!realOwner&&l.itemId&&!c?{costLater:true}:{})}; }),
     sub,discount,total,note:o.note||"",cut,showPhone:o.showPhone!==false};
   if(type==="receipt") v.via=o.via||"เงินสด";
   if(sh.ful){ Object.assign(v,sh); v.shipFee=0; }
   try{ const cid=await upsertCust({name:v.customer,phone:v.phone,addr:v.addr,ship:v.shipAddr}); if(cid) v.custId=cid; }catch(e){}
   if(type==="credit"){ v.due=dateMs+(+o.dueDays||0)*DAY; v.payments=[]; }
-  if(cut){ const at=Date.now(), live={};
-    for(const op of ops){ const base=live[op.id]||items.find(i=>i.id===op.id);
-      if(op.kind==="cut"){ await applyCut(base,op.p,op.l.qty,`${op.l.unit||"ท่อน"} ${op.l.cut.label}`,`ขาย ${v.no} ${v.customer}`,at); live[op.id]={...base,qty:op.p.full,rem:op.p.keep}; }
-      else { const nq=(+base.qty||0)-op.l.qty; await store.update("items/"+op.id,{qty:nq,updatedAt:at});
-        await addMove({type:"out",qty:op.l.qty,itemId:op.id,name:base.name,note:`ขาย ${v.no} ${v.customer}`,at}); live[op.id]={...base,qty:nq}; } } }
   if(o.photo&&assets){ try{ const up=await assets.upload(o.photo,{type:"image/jpeg"}); v.photoId=up.id; }catch(err){ toast("แนบรูปไม่สำเร็จ บันทึกเอกสารโดยไม่มีรูป"); } }
-  const id=uid(); await store.set("docs/"+id,v); return {id,...v,...(me?{by:me}:{})};
+  // ตัดสต็อก + บันทึกเอกสารใน transaction เดียว: สำเร็จทั้งหมดหรือไม่เขียนอะไรเลย
+  const id=uid(), at=Date.now();
+  await store.run(async tx=>{
+    if(cut){ const stk=stockTx(tx);
+      for(const op of ops){ const it=await stk.load(op.id); if(!it) throw userErr("ไม่พบสินค้าในสต็อก");
+        if(op.kind==="cut") await cutApply(stk,it,cutSpecOf(op.l.cut),op.l.qty,op.l.cut.useOld!==false,`${op.l.unit||"ท่อน"} ${op.l.cut.label}`,`ขาย ${v.no} ${v.customer}`,at);
+        else { stk.out(it,op.l.qty); stk.move({type:"out",qty:op.l.qty,itemId:op.id,name:it.name,note:`ขาย ${v.no} ${v.customer}`,at}); } }
+      stk.flush(at); }
+    tx.set("docs/"+id,v);
+  });
+  return {id,...v,...(me?{by:me}:{})};
 }
 function typeChanged(){ const t=fd.type.value; $("#cutWrap").hidden=t==="quote"; $("#viaWrap").hidden=t!=="receipt"; $("#dueWrap").hidden=t!=="credit"; }
 
@@ -2441,7 +2461,7 @@ $("#cuPay").addEventListener("click",()=>{
   openPay({title:"รับชำระจาก "+(open[0]?.customer||""),info:`ค้าง ${open.length} ใบ รวม ${money(owed)} บาท · ตัดใบที่ครบกำหนดก่อน`,amount:owed,onSave:async p=>{
     let left=p.amount;
     for(const d of open){ if(left<=0) break; const take=Math.min(left,docOwed(d)); left=Math.round((left-take)*100)/100;
-      await store.update("docs/"+d.id,{payments:[...(d.payments||[]),{...p,amount:take}]}); }
+      await store.update("docs/"+d.id,{payments:store.push({...p,amount:take})}); }
     setTimeout(()=>openCust(custCur),300);
   }});
 });
@@ -2464,7 +2484,7 @@ function buyPayInfo(b){
   $("#bPayBtn").hidden=!(o>0);
 }
 $("#bPayBtn").addEventListener("click",()=>{ const b=editingBuy; openPay({title:"จ่ายเงิน "+b.seller,info:`ค้าง ${money(buyOwed(b))} บาท`,amount:buyOwed(b),onSave:async p=>{
-  const payments=[...(b.payments||[]),p]; await store.update("buys/"+b.id,{payments}); editingBuy={...b,payments}; buyPayInfo(editingBuy); }}); });
+  await store.update("buys/"+b.id,{payments:store.push(p)}); editingBuy={...b,payments:[...(b.payments||[]),p]}; buyPayInfo(editingBuy); }}); });
 const buyTag=b=>{ if(b.payStatus!=="credit") return ""; const o=buyOwed(b); if(o<=0) return `<span class="tag ok">จ่ายครบ</span>`; const od=daysFrom(b.due||b.date); return `<span class="tag ${od>0?"due":"part"}">ค้างจ่าย ${fmt(o)}${od>0?` เกิน ${od} วัน`:` · ${dlong(b.due)}`}</span>`; };
 
 /* ===================== alerts ===================== */
@@ -2618,7 +2638,7 @@ function renderReport(){
   sales.forEach(d=>{ const t=d.date||d.at; d.lines.forEach(l=>{ const k=l.itemId||("n:"+l.name);
     if(l.itemId) last[l.itemId]=Math.max(last[l.itemId]||0,t);
     if(t<a) return; const it=items.find(i=>i.id===l.itemId); const x=agg[k]||(agg[k]={name:(it||{}).name||l.name,qty:0,rev:0,prof:0,unit:it?it.unit:l.unit});
-    x.qty+=eq(l); x.rev+=(+l.qty||0)*(+l.price||0); x.prof+=(+l.qty||0)*((+l.price||0)-(+l.cost||0)); }); });
+    x.qty+=eq(l); x.rev+=(+l.qty||0)*(+l.price||0); x.prof+=(+l.qty||0)*((+l.price||0)-lineCost(l,it)); }); });
   const best=Object.values(agg).sort((x,y)=>y.rev-x.rev).slice(0,15);
   const slow=items.filter(i=>itemUnits(i)>0&&i.unit!=="กก.").map(i=>({...i,days:last[i.id]?Math.floor((now-last[i.id])/DAY):null,val:itemVal(i,isStaff()?"price":"cost")||itemVal(i)}))
     .filter(i=>i.days===null||i.days>=90).sort((x,y)=>y.val-x.val);
@@ -2770,13 +2790,15 @@ fss.item.addEventListener("change",ssFill); fss.addEventListener("input",ssCalc)
 fss.addEventListener("submit",async e=>{
   if(e.submitter&&e.submitter.value!=="save") return; e.preventDefault(); if(!fss.reportValidity()) return;
   const i=items.find(x=>x.id===fss.item.value); if(!i) return toast("เลือกสินค้า"); const kg=+fss.kg.value, p=+fss.ppk.value;
-  if(kg>(+i.qty||0)) return toast(`มีแค่ ${fmt(i.qty)} กก.`);
+  if(kg>round2(+i.qty||0)) return toast(`มีแค่ ${fmt(i.qty)} กก.`);
   const at=Date.now();
-  try{ await store.update("items/"+i.id,{qty:Math.round(((+i.qty||0)-kg)*100)/100,updatedAt:at});
-    await addMove({type:"out",qty:kg,itemId:i.id,name:i.name,note:`ขายเศษให้ ${fss.buyer.value.trim()||"โรงหลอม"} ${money(p)}/กก.`,at});
-    await store.set("cash/"+uid(),{type:"in",cat:"ขายเศษเหล็ก",amount:Math.round(kg*p*100)/100,date:at,via:fss.via.value,note:`${i.name} ${fmt(kg)} กก. → ${fss.buyer.value.trim()||"โรงหลอม"}`,itemId:i.id,kg,cogs:Math.round(kg*(+i.cost||0)*100)/100,at});
+  try{ await store.run(async tx=>{ const stk=stockTx(tx), it=await stk.load(i.id); if(!it) throw userErr("ไม่พบสินค้านี้แล้ว");
+      stk.out(it,kg);
+      stk.move({type:"out",qty:kg,itemId:i.id,name:i.name,note:`ขายเศษให้ ${fss.buyer.value.trim()||"โรงหลอม"} ${money(p)}/กก.`,at});
+      stk.flush(at);
+      tx.set("cash/"+uid(),{type:"in",cat:"ขายเศษเหล็ก",amount:Math.round(kg*p*100)/100,date:at,via:fss.via.value,note:`${i.name} ${fmt(kg)} กก. → ${fss.buyer.value.trim()||"โรงหลอม"}`,itemId:i.id,kg,cogs:Math.round(kg*(+i.cost||0)*100)/100,at}); });
     $("#dScrapSell").close(); toast(`ขายเศษ ${fmt(kg)} กก. ได้ ${money(kg*p)} บาท`);
-  }catch(err){ toast("บันทึกไม่สำเร็จ"); }
+  }catch(err){ toast(err&&err.user?err.message:"บันทึกไม่สำเร็จ"); }
 });
 
 /* ===================== customer orders (to source) ===================== */
@@ -3046,7 +3068,7 @@ $("#xlsBtn").addEventListener("click",async()=>{
     "เลขที่บิล":b.billNo||"","รายการ":l.desc,"จำนวน":l.qty,"หน่วย":l.unit,"ราคา/หน่วย":l.price,"จำนวนเงิน":Math.round(l.qty*l.price*100)/100,
     "เข้าสต็อก":(items.find(i=>i.id===l.itemId)||{}).name||"","จำนวนเข้าสต็อก":l.addQty||"","ยอดบิล":b.total,"มีรูปใบเสร็จ":b.photoId?"มี":"","การจ่าย":b.payStatus==="credit"?"เครดิต":"จ่ายแล้ว","คงค้างจ่าย":buyOwed(b)||"","ครบกำหนด":b.due?dlong(b.due):"","หมายเหตุ":b.note||""}))));
   add("ขาย-เอกสาร",docs.flatMap(d=>d.lines.map(l=>({"เลขที่":d.no,"ประเภท":DOCNAME[d.type],"วันที่":dlong(d.date||d.at),"ลูกค้า":d.customer,
-    "รายการ":l.name,"จำนวน":l.qty,"หน่วย":l.unit,"ราคา/หน่วย":l.price,"จำนวนเงิน":l.qty*l.price,"ทุน/หน่วย":+l.cost||0,"กำไรรายการ":Math.round(l.qty*(l.price-(+l.cost||0))*100)/100,
+    "รายการ":l.name,"จำนวน":l.qty,"หน่วย":l.unit,"ราคา/หน่วย":l.price,"จำนวนเงิน":l.qty*l.price,"ทุน/หน่วย":lineCost(l,items.find(i=>i.id===l.itemId)),"กำไรรายการ":Math.round(l.qty*(l.price-lineCost(l,items.find(i=>i.id===l.itemId)))*100)/100,
     "ส่วนลดทั้งใบ":d.discount,"ยอดสุทธิทั้งใบ":d.total,"รับเงินทาง":d.via||"","การรับสินค้า":d.ful==="ship"?"จัดส่ง":d.ful==="pickup"?"มารับเอง":"","ที่อยู่จัดส่ง":d.shipAddr||"","ส่งแล้ว":d.deliveredAt?dlong(d.deliveredAt):"","คงค้าง":docOwed(d)||"","ครบกำหนด":d.due?dlong(d.due):"","ตัดสต็อก":d.cut?"ใช่":""}))));
   add("รายรับ-รายจ่าย",ledger().map(x=>({"วันที่":dlong(x.t),"ประเภท":x.dir==="in"?"รายรับ":"รายจ่าย","หมวด":x.cat,"รายการ":x.title,"อ้างอิง":x.sub,
     "รายรับ":x.dir==="in"?x.amt:"","รายจ่าย":x.dir==="out"?x.amt:""})));
