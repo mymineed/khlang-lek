@@ -1,9 +1,50 @@
 rules_version = '2';
 service cloud.firestore {
-  match /databases/{db}/documents {
-    // Initial development rules - will be restricted with Auth & roles in Phase 3
-    match /{document=**} {
-      allow read, write: if true;
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function userPath() { return /databases/$(database)/documents/users/$(request.auth.uid); }
+    function profile() { return get(userPath()).data; }
+    // ล็อกอินแล้ว + มีโปรไฟล์ + เจ้าของอนุมัติแล้ว (pending / disabled = ห้าม)
+    function approved() { return signedIn() && exists(userPath()) && profile().status == 'approved'; }
+    function isOwner() { return approved() && profile().role == 'owner'; }
+
+    // ข้อมูลหน้าร้านที่ลูกน้องต้องใช้ขายของ
+    // หมายเหตุ: ต้นทุนยังฝังอยู่ใน items.cost / docs.lines.cost / buys
+    // rules กันระดับฟิลด์ไม่ได้ จะกันลูกน้องได้จริงหลังแยกไป itemCosts (เช็กลิสต์ข้อ 4)
+    match /{col}/{id} {
+      allow read, write: if approved()
+        && col in ['items', 'moves', 'buys', 'docs', 'cash', 'closes', 'counts', 'orders', 'customers'];
+    }
+
+    // ตั้งค่าร้าน / ราคารับซื้อ / ประวัติปรับราคา: ทุกคนที่อนุมัติแล้วอ่านได้ เจ้าของแก้ได้คนเดียว
+    match /settings/{id} {
+      allow read: if approved();
+      allow write: if isOwner();
+    }
+    match /prices/{id} {
+      allow read: if approved();
+      allow write: if isOwner();
+    }
+
+    // ต้นทุนแยก (เตรียมไว้สำหรับเช็กลิสต์ข้อ 4) — เจ้าของเท่านั้น
+    match /itemCosts/{id} {
+      allow read, write: if isOwner();
+    }
+
+    match /users/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || isOwner());
+      allow list: if isOwner();
+      // สมัครใหม่ได้เฉพาะโปรไฟล์ของตัวเองในสถานะ staff/pending เท่านั้น
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.role == 'staff'
+        && request.resource.data.status == 'pending';
+      // เจ้าของแก้ได้ทุกคน; ผู้ใช้แก้ของตัวเองได้แต่ห้ามแตะ role/status
+      allow update: if isOwner()
+        || (signedIn() && request.auth.uid == uid
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'status', 'uid', 'approvedBy', 'approvedAt']));
+      allow delete: if isOwner();
     }
   }
 }
