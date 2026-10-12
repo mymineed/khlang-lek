@@ -10,11 +10,23 @@ service cloud.firestore {
     function isOwner() { return approved() && profile().role == 'owner'; }
 
     // ข้อมูลหน้าร้านที่ลูกน้องต้องใช้ขายของ
-    // หมายเหตุ: ต้นทุนยังฝังอยู่ใน items.cost / docs.lines.cost / buys
-    // rules กันระดับฟิลด์ไม่ได้ จะกันลูกน้องได้จริงหลังแยกไป itemCosts (เช็กลิสต์ข้อ 4)
+    // หมายเหตุ: ทุนในบิลขาย (docs.lines.cost) และราคาในบิลซื้อ (buys) ลูกน้องยังอ่านได้ (ตัดสินใจแล้ว: ทาง ข)
     match /{col}/{id} {
       allow read, write: if approved()
-        && col in ['items', 'moves', 'buys', 'docs', 'cash', 'closes', 'counts', 'orders', 'customers', 'counters'];
+        && col in ['moves', 'buys', 'docs', 'cash', 'closes', 'counts', 'orders', 'customers', 'counters'];
+    }
+
+    // สินค้า: ห้ามเขียนทุนลง items (ทุนอยู่ที่ itemCosts) แก้ฟิลด์อื่นได้ตามปกติ
+    // items.cost เดิม (ก่อนย้าย) ต้องคงค่าเดิม มีแต่เจ้าของที่ลบออกได้ตอนย้ายไป itemCosts
+    function costKept() {
+      return 'cost' in resource.data
+        ? ('cost' in request.resource.data && request.resource.data.cost == resource.data.cost)
+        : !('cost' in request.resource.data);
+    }
+    match /items/{id} {
+      allow read, delete: if approved();
+      allow create: if approved() && !('cost' in request.resource.data);
+      allow update: if approved() && (costKept() || (isOwner() && !('cost' in request.resource.data)));
     }
 
     // ตั้งค่าร้าน / ราคารับซื้อ / ประวัติปรับราคา: ทุกคนที่อนุมัติแล้วอ่านได้ เจ้าของแก้ได้คนเดียว
@@ -27,9 +39,13 @@ service cloud.firestore {
       allow write: if isOwner();
     }
 
-    // ต้นทุนแยก (เตรียมไว้สำหรับเช็กลิสต์ข้อ 4) — เจ้าของเท่านั้น
+    // ต้นทุนแยก: เจ้าของอ่าน/แก้ได้คนเดียว
+    // ลูกน้องเพิ่มได้แค่รายการซื้อเข้าใน pending (อ่านไม่ได้) เครื่องเจ้าของจะคำนวณทุนเฉลี่ยให้
     match /itemCosts/{id} {
       allow read, write: if isOwner();
+      allow create: if approved() && request.resource.data.keys().hasOnly(['pending']);
+      allow update: if approved() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pending'])
+        && request.resource.data.pending.size() > resource.data.get('pending', []).size();
     }
 
     match /users/{uid} {
