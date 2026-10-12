@@ -49,17 +49,19 @@
   - (ไม่บังคับ) `ANTHROPIC_MODEL` ถ้าจะเปลี่ยนรุ่น, `FIREBASE_PROJECT_ID` ถ้าไม่อยากให้ function อ่านจาก `VITE_FIREBASE_PROJECT_ID`
 - เปลี่ยน env แล้วต้อง **Redeploy** ค่า `VITE_*` ถึงจะเข้าไปในหน้าเว็บ
 
-## ช่วงเดโม (ยังไม่ใช้งานจริง)
-ตอนนี้ตั้งใจเปิด `firestore.rules` ไว้ (`if true`) เพื่อให้แก้ง่าย **ห้ามใส่ข้อมูลจริงของลูกค้าจนกว่าจะทำเช็กลิสต์นี้ครบ**
+## สถานะความปลอดภัย (เช็กลิสต์ก่อนใช้งานจริง)
+Firebase project: `jin-replit1` — rules ใหม่ deploy แล้ว (2026-10-12) ผ่าน Firebase console (ตรวจจากภายนอกแล้ว: ไม่ล็อกอินอ่าน Firestore ได้ 403) เจ้าของล็อกอินและเห็นข้อมูล/ต้นทุนปกติ
+**แก้ rules ใน repo แล้วต้อง deploy ใหม่เสมอ** (`firebase deploy --only firestore:rules,storage --project jin-replit1` หรือวางใน Firebase console) และ deploy หลัง Vercel ขึ้นโค้ดที่เข้ากันแล้วเท่านั้น
 
-### เช็กลิสต์ก่อนใช้งานจริง (ทำตามลำดับ)
-1. ย้าย `store.sub(...)` ใน `init()` (`src/main.js`) ไปเริ่มหลังล็อกอินและได้รับอนุมัติแล้ว — ตอนนี้ subscribe ก่อน auth ถ้าปิด rules ก่อนแก้ข้อนี้ listener จะโดน permission-denied แล้วหยุดทำงาน (หน้าว่าง)
-2. เขียน `firestore.rules`: ไม่ล็อกอิน = ห้ามทุกอย่าง, `pending`/`disabled` = ห้าม, staff ห้ามอ่านต้นทุน/กำไร, ผู้ใช้ห้ามแก้ `role`/`status` ของตัวเอง + เพิ่ม `storage.rules` แล้ว deploy (`firebase deploy --only firestore:rules,storage`)
-3. ลบเงื่อนไขอีเมลมี `dev`/`zined` → owner อัตโนมัติ (`src/lib/auth.js` สองจุด)
-4. แยกต้นทุนออกจาก `items` ไป `itemCosts` (owner อ่านได้คนเดียว) และให้ shim `isOwner()` อ่านจาก role จริง
-5. บังคับเปลี่ยน PIN ค่าเริ่มต้น `8888`/`1111`
-6. ทำ `nextNo` ให้ไม่ซ้ำเมื่อหลายเครื่องออกบิลพร้อมกัน (transaction/counter)
-7. ~~เอา Firebase config สำรองที่ฝังใน `src/lib/firebase.js` ออก~~ ✅ ทำแล้ว — ตอนนี้ใช้ `VITE_FIREBASE_*` จาก Vercel env อย่างเดียว ถ้าไม่ตั้ง แอปจะเป็นโหมดทดลอง (เก็บในเครื่อง)
+1. ✅ `store.sub(...)` เริ่มหลังล็อกอินและได้รับอนุมัติแล้ว (`startSubs()` ใน `src/main.js`)
+2. ✅ `firestore.rules` + `storage.rules`: ไม่ล็อกอิน / `pending` / `disabled` = ห้าม, ผู้ใช้ห้ามแก้ `role`/`status` ของตัวเอง (เทสต์ใน `tests/rules/`)
+3. ✅ ลบเงื่อนไขอีเมลมี `dev`/`zined` → owner อัตโนมัติแล้ว
+4. ✅ ต้นทุนแยกไป `itemCosts` (owner อ่านได้คนเดียว), shim `isOwner()` อ่านจาก role จริง — ตามที่เลือก: ราคาในบิลซื้อ (`buys`) และทุนในบิลขาย (`docs.lines.cost`) ลูกน้องยังอ่านได้
+5. ✅ PIN `8888`/`1111` ไม่ได้ใช้ตรวจสิทธิ์แล้ว (ใช้ล็อกอินอีเมล) จึงเลิกเขียนลง `settings/shop` แทนการบังคับเปลี่ยน
+6. ✅ `nextNo` จองเลขผ่าน transaction ที่ `counters/{prefix}`
+7. ✅ ไม่มี Firebase config ฝังในโค้ด ใช้ `VITE_FIREBASE_*` จาก Vercel env อย่างเดียว ถ้าไม่ตั้ง แอปจะเป็นโหมดทดลอง (เก็บในเครื่อง)
+
+ยังไม่ได้ลองบนของจริง: ขาย/รับเข้า/รับชำระ, บัญชีลูกน้อง, อ่านบิล (`api/read-doc.js` ต้องตั้ง `ANTHROPIC_API_KEY`), Storage rules (ยังไม่ได้ตรวจจากภายนอก)
 
 ## งานแรกของ session แรก (รีวิวสถานะ)
 1. อ่าน `docs/PLAN.md` แล้วเทียบกับโค้ดจริงทีละเฟส ทำตารางสรุป ✅ ทำแล้ว / ⚠️ ทำไม่ครบ / ❌ ยังไม่ทำ พร้อมไฟล์และบรรทัดที่อ้างอิง
