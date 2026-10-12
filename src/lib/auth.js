@@ -90,8 +90,8 @@ export function initAuth(onReady) {
           console.warn("Could not check existing owners:", err);
         }
 
-        // Dev account or first user gets owner & approved immediately
-        const isDev = isFirstUser || user.email.toLowerCase().includes("dev") || user.email.toLowerCase().includes("zined");
+        // First user gets owner & approved immediately
+        const isDev = isFirstUser;
         const newProfile = {
           uid: user.uid,
           email: user.email,
@@ -155,7 +155,7 @@ export async function registerUser({ email, password, displayName }) {
       isFirstUser = snapshot.empty;
     } catch (e) {}
 
-    const isDev = isFirstUser || cleanEmail.includes("dev") || cleanEmail.includes("zined");
+    const isDev = isFirstUser;
     const profile = {
       uid: user.uid,
       email: cleanEmail,
