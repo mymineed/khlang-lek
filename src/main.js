@@ -55,11 +55,29 @@ function localStore(){
 function dbStore(db){
   return { mode:"db",
     sub(c,o,cb){ let q=db.collection(c); if(o.order) q=q.orderBy(o.order,"desc"); if(o.limit) q=q.limit(o.limit);
-      q.onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()}))), onDbErr); },
+      return q.onSnapshot(s=>cb(s.docs.map(d=>({id:d.id,...d.data()}))), onDbErr); },
     set:(p,v)=>db.doc(p).set(v), update:(p,v)=>db.doc(p).update(v), del:p=>db.doc(p).delete() };
 }
 function onDbErr(e){ toast("ฐานข้อมูลขัดข้อง: "+(e&&e.code||"ไม่ทราบสาเหตุ")); }
 const addMove = m => store.set("moves/"+uid(), m);
+
+/* Firestore listeners start only after login + approval (rules deny everything else) */
+let unsubs=[];
+function startSubs(){
+  if(unsubs.length) return;
+  const sub=(c,o,cb)=>{ const u=store.sub(c,o,cb); unsubs.push(typeof u==="function"?u:()=>{}); };
+  sub("items",{},v=>{items=v;render();renderProfit();});
+  sub("moves",{order:"at",limit:600},v=>{moves=v;renderLog();});
+  sub("buys",{order:"at",limit:1000},v=>{buys=v;renderBuys();renderProfit();renderCash();renderAlerts();});
+  sub("docs",{order:"at",limit:1000},v=>{docs=v;renderDocs();renderProfit();renderCash();renderAlerts();if(moneyView==="report")renderReport();});
+  sub("closes",{order:"at",limit:120},v=>{closes=v.map(c=>({...c,date:c.date||c.id}));if(moneyView==="close"&&!$("#tab-close").hidden&&document.activeElement?.closest?.("#closeBody")==null)renderClose();});
+  sub("prices",{order:"at",limit:30},v=>{priceHist=v;});
+  sub("orders",{order:"at",limit:500},v=>{orders=v;renderDocs();});
+  sub("customers",{},v=>{customers=v;fillCustList();if(docFilter==="ลูกค้า")renderCustDir();});
+  sub("cash",{order:"at",limit:2000},v=>{cash=v;renderCash();renderProfit();});
+  sub("settings",{},v=>{ const s=v.find(x=>x.id==="shop"); shop={...DEFAULT_SHOP,...(s||{})}; const g=v.find(x=>x.id==="scrap"); grades=g&&Array.isArray(g.grades)?g.grades:[]; $("#shopTitle").textContent = shop.name ? `คลังเหล็ก · ${shop.name}` : "คลังเหล็ก"; });
+}
+function stopSubs(){ unsubs.forEach(u=>{ try{u();}catch(e){} }); unsubs=[]; }
 
 async function init(){
   render();
@@ -70,16 +88,7 @@ async function init(){
   try{ if(window.claude&&claude.use){ userCap=await claude.use("user"); if(userCap){ try{ me=await userCap.id(); }catch(e){} } } }catch(e){}
   applyRole();
   $("#mode").innerHTML = db ? "<b>●</b> ออนไลน์" : "โหมดทดลอง"; $("#mode").title = db ? "ฐานข้อมูลออนไลน์ ซิงก์ทุกเครื่อง" : "บันทึกเฉพาะเครื่องนี้";
-  store.sub("items",{},v=>{items=v;render();renderProfit();});
-  store.sub("moves",{order:"at",limit:600},v=>{moves=v;renderLog();});
-  store.sub("buys",{order:"at",limit:1000},v=>{buys=v;renderBuys();renderProfit();renderCash();renderAlerts();});
-  store.sub("docs",{order:"at",limit:1000},v=>{docs=v;renderDocs();renderProfit();renderCash();renderAlerts();if(moneyView==="report")renderReport();});
-  store.sub("closes",{order:"at",limit:120},v=>{closes=v.map(c=>({...c,date:c.date||c.id}));if(moneyView==="close"&&!$("#tab-close").hidden&&document.activeElement?.closest?.("#closeBody")==null)renderClose();});
-  store.sub("prices",{order:"at",limit:30},v=>{priceHist=v;});
-  store.sub("orders",{order:"at",limit:500},v=>{orders=v;renderDocs();});
-  store.sub("customers",{},v=>{customers=v;fillCustList();if(docFilter==="ลูกค้า")renderCustDir();});
-  store.sub("cash",{order:"at",limit:2000},v=>{cash=v;renderCash();renderProfit();});
-  store.sub("settings",{},v=>{ const s=v.find(x=>x.id==="shop"); shop={...DEFAULT_SHOP,...(s||{})}; const g=v.find(x=>x.id==="scrap"); grades=g&&Array.isArray(g.grades)?g.grades:[]; $("#shopTitle").textContent = shop.name ? `คลังเหล็ก · ${shop.name}` : "คลังเหล็ก"; });
+  if(store.mode==="local") startSubs();
   try{ if(window.claude&&claude.use) downloads=await claude.use("downloads"); }catch(e){}
   $("#xlsBtn").hidden = !downloads; $("#vSave").hidden = !downloads;
   try{ assets=await claude.use("assets"); }catch(e){}
@@ -1872,6 +1881,7 @@ function handleAuthStateChange(auth){
   if(auth.loading) return;
 
   if(!auth.user){
+    if(store?.mode==="db") stopSubs();
     // User signed out -> open Auth modal
     if(!$("#dAuth").open) $("#dAuth").showModal();
     if($("#dPending")?.open) $("#dPending").close();
@@ -1896,6 +1906,7 @@ function handleAuthStateChange(auth){
 
   const profile = auth.profile;
   if(!profile || profile.status === "pending"){
+    if(store?.mode==="db") stopSubs();
     // User is awaiting approval
     if($("#dUsers")?.open) $("#dUsers").close();
     if($("#dUserMenu")?.open) $("#dUserMenu").close();
@@ -1912,6 +1923,7 @@ function handleAuthStateChange(auth){
   }
 
   if(profile.status === "disabled"){
+    if(store?.mode==="db") stopSubs();
     if($("#dPending")?.open) $("#dPending").close();
     alert("บัญชีของคุณถูกระงับสิทธิ์การใช้งาน กรุณาติดต่อเจ้าของร้าน");
     logoutUser();
@@ -1937,6 +1949,7 @@ function handleAuthStateChange(auth){
   const sbAvatar = $("#sidebarAvatar"); if(sbAvatar) sbAvatar.textContent = realOwner ? "👑" : "👤";
 
   applyRole();
+  if(store) startSubs();
   render();
   renderProfit();
 }
