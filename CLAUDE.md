@@ -19,6 +19,7 @@
 - `npm run dev` — รันเครื่องตัวเอง
 - `npm run build` — ต้องผ่านก่อนเปิด PR ทุกครั้ง
 - `npm test` — Vitest (เทสต์อยู่ใน `tests/`, ฟังก์ชันคำนวณที่แยกออกมาอยู่ใน `src/lib/`)
+- `npm run test:rules` — เทสต์ rules + `dbStore` บน Firestore/Storage emulator (`tests/rules/`, ต้องมี Java) ไม่แตะของจริง
 
 ## กฎการทำงาน (สำคัญ)
 1. **ห้าม push เข้า `main` ตรงๆ** Vercel deploy ขึ้นของจริงที่ลูกค้าใช้อยู่ทันที ให้ทำบน branch แยก (`fix/...`, `feat/...`) แล้วเปิด PR รอผมอนุมัติ Vercel จะมี preview URL ให้ทดสอบ
@@ -29,8 +30,11 @@
 6. commit message สั้น ชัดเจน หนึ่งเรื่องต่อหนึ่ง commit
 
 ## สถาปัตยกรรมที่ต้องรู้
-- **ชั้น storage**: `store` มี `sub/set/update/del` path รูปแบบ `collection/id`; มี `localStore` (localStorage, ไว้ dev) และ `dbStore` (Firestore)
-- **Collections**: `items, moves, buys, docs, cash, settings, closes, counts, prices, orders, customers` (+ `users`, และ `itemCosts` ถ้าแยกต้นทุนแล้ว)
+- **ชั้น storage** (`src/lib/store.js`): `store` มี `sub/set/update/del` path รูปแบบ `collection/id`; มี `localStore` (localStorage, ไว้ dev) และ `dbStore` (Firestore)
+  - `store.run(fn)` = transaction (อ่านค่าล่าสุดแล้วเขียนทั้งหมดพร้อมกัน) ใช้กับทุกอย่างที่ลดสต็อก/ตัดเหล็ก/ออกบิล; `store.inc(n)` / `store.push(v)` = เพิ่มจำนวน/ต่อท้ายอาร์เรย์โดยไม่ทับเครื่องอื่น (ใช้กับรับเข้าและรับชำระ)
+  - ต้นทุนอยู่ที่ `itemCosts/{itemId}` ไม่ใช่ `items.cost`: เจ้าของอ่านได้คนเดียว ลูกน้องบันทึกซื้อเข้าด้วย `store.costIn` (ต่อท้าย `pending`) แล้วเครื่องเจ้าของคำนวณทุนเฉลี่ย (`src/lib/item-costs.js`) เจ้าของเปิดแอปครั้งแรกจะย้าย `items.cost` เดิมไปให้อัตโนมัติ
+  - บิลที่ลูกน้องออกไม่มีทุน บรรทัดจะมี `costLater:true` รายงานกำไรใช้ทุนปัจจุบันของสินค้าแทน (`lineCost`)
+- **Collections**: `items, moves, buys, docs, cash, settings, closes, counts, prices, orders, customers` + `users`, `itemCosts` (ต้นทุน), `counters` (เลขที่เอกสาร)
 - **Shim**: โค้ดเดิมเรียก `claude.use("db" | "user" | "assets" | "downloads" | "sample")` ซึ่งเดิมมาจาก claude.ai ตอนนี้ถูกแทนด้วย `window.claude` shim ที่ต่อ Firebase/Vercel (ดู `src/lib/claude-shim.js`)
 - **สิทธิ์**: เจ้าของเห็นต้นทุน-กำไร ลูกน้องไม่เห็น ต้องบังคับที่ `firestore.rules` ด้วย ไม่ใช่แค่ซ่อนใน UI (CSS `.owner`, `isStaff()`)
 - **ข้อมูลร้าน** (ชื่อ ที่อยู่ เบอร์ เลขผู้เสียภาษี) อยู่ใน `settings/shop` ห้ามฝังค่าของลูกค้ารายใดไว้ในโค้ดหรือในพรอมต์อ่านบิล
