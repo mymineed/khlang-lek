@@ -29,7 +29,7 @@ const money = n => Number(n||0).toLocaleString("th-TH",{minimumFractionDigits:2,
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 const dstr = t => new Date(t).toLocaleString("th-TH",{dateStyle:"short",timeStyle:"short"});
 const dlong = t => new Date(t).toLocaleDateString("th-TH",{year:"numeric",month:"long",day:"numeric"});
-const DEFAULT_SHOP = {name:"", phone:"", tax:"", addr:"", promptpay:"", bankName:"", bankAcc:"", bankHolder:"", billNote:"สินค้าซื้อแล้วไม่รับเปลี่ยนหรือคืน · โปรดตรวจนับสินค้าก่อนรับมอบ", ownerPin:"8888", staffPin:"1111", slipWidth:"80mm", defaultPrint:"slip", autoPrintQuick:false, showPromptpaySlip:true, showBankSlip:true};
+const DEFAULT_SHOP = {name:"", phone:"", tax:"", addr:"", promptpay:"", bankName:"", bankAcc:"", bankHolder:"", billNote:"สินค้าซื้อแล้วไม่รับเปลี่ยนหรือคืน · โปรดตรวจนับสินค้าก่อนรับมอบ", slipWidth:"80mm", defaultPrint:"slip", autoPrintQuick:false, showPromptpaySlip:true, showBankSlip:true};
 
 let items=[], moves=[], buys=[], docs=[], cash=[], shop={...DEFAULT_SHOP};
 let cat="ทั้งหมด", docFilter="ทั้งหมด", buyFilter="ทั้งหมด", tab="stock", current=null, store, downloads=null, assets=null, sample=null, sampleImg=false;
@@ -2993,8 +2993,6 @@ fs.addEventListener("submit",async e=>{
   v.autoPrintQuick = !!fs.autoPrintQuick?.checked;
   v.showPromptpaySlip = !!fs.showPromptpaySlip?.checked;
   v.showBankSlip = !!fs.showBankSlip?.checked;
-  if(!v.ownerPin) v.ownerPin = "8888";
-  if(!v.staffPin) v.staffPin = "1111";
   try{
     await store.set("settings/shop",v);
     shop={...DEFAULT_SHOP,...v};
