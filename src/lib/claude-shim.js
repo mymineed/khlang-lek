@@ -93,6 +93,68 @@ const assetsShim = {
   }
 };
 
+
+// อ่านรูปบิลผ่าน /api/read-doc (Vercel function ใช้ API key ของร้าน) — ต้องล็อกอินก่อน
+const MAX_BODY_BYTES = 3_500_000; // Vercel รับ body ได้ราว 4.5MB เผื่อไว้
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function reencode(blob, maxDim, quality) {
+  const bmp = await createImageBitmap(blob);
+  const r = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * r); c.height = Math.round(bmp.height * r);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  bmp.close?.();
+  return new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error("encode")), "image/jpeg", quality));
+}
+
+async function encodeImages(blobs) {
+  const steps = [null, [1400, 0.75], [1100, 0.7], [900, 0.65]];
+  for (const step of steps) {
+    const list = step ? await Promise.all(blobs.map(b => reencode(b, step[0], step[1]))) : blobs;
+    const images = await Promise.all(list.map(async b => ({
+      media_type: step ? "image/jpeg" : (b.type || "image/jpeg"),
+      data: await blobToBase64(b),
+    })));
+    if (images.reduce((n, i) => n + i.data.length, 0) <= MAX_BODY_BYTES) return images;
+  }
+  throw { code: "image_rejected", message: "Images too large" };
+}
+
+const sampleShim = {
+  async limits() { return null; },
+  async json(prompt, { images = [] } = {}) {
+    const user = getAuth()?.currentUser;
+    if (!user) throw { code: "not_granted", message: "Not signed in" };
+    if (!images.length) throw { code: "image_rejected", message: "No images" };
+    const body = JSON.stringify({ prompt, images: await encodeImages(images) });
+    let resp;
+    try {
+      resp = await fetch("/api/read-doc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${await user.getIdToken()}` },
+        body,
+      });
+    } catch (err) {
+      throw { code: "network_error", message: String(err) };
+    }
+    const out = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const code = out.code === "not_configured" ? "unavailable" : (out.code || "upstream_error");
+      throw { code, message: `read-doc ${resp.status}` };
+    }
+    return out.data;
+  }
+};
+
 window.claude = {
   async use(name) {
     if (name === "db") {
@@ -113,7 +175,8 @@ window.claude = {
     }
     if (name === "sample") {
       if (window._sampleShim) return window._sampleShim;
-      throw new Error("sample capability not configured yet");
+      if (getAuth()) return sampleShim;
+      throw new Error("sample capability needs Firebase Auth");
     }
     throw new Error("unknown capability: " + name);
   }
