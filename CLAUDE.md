@@ -11,7 +11,7 @@
 ## Stack
 - Vite + vanilla JS (ยังไม่ใช่ React ตั้งใจไม่เขียนใหม่)
 - Firebase: Firestore, Auth, Storage — ใช้ **compat SDK** (`firebase/compat/*` ใน `src/lib/firebase.js`)
-- Vercel: deploy อัตโนมัติจาก `main`, มี serverless function `api/read-doc.js` เรียก Anthropic API (Claude Haiku 5.5) อ่านบิล — ฝั่งเว็บเรียกผ่าน capability `sample` ใน `src/lib/claude-shim.js` และต้องส่ง Firebase ID token มาด้วย
+- Vercel: เว็บจริง https://khlang-lek.vercel.app (โปรเจ็ค `zinedinekkbs-projects/khlang-lek`) deploy อัตโนมัติจาก `main`, มี serverless function `api/read-doc.js` เรียก Anthropic API (Claude Haiku 5.5) อ่านบิล — ฝั่งเว็บเรียกผ่าน capability `sample` ใน `src/lib/claude-shim.js` และต้องส่ง Firebase ID token มาด้วย
 - ไลบรารี: `xlsx` (SheetJS), `qrcode-generator`
 
 ## คำสั่งที่ใช้บ่อย
