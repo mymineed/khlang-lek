@@ -80,6 +80,10 @@ describe("ลูกน้อง (approved staff)", () => {
   it("อ่าน itemCosts ไม่ได้", async () => {
     await assertFails(as("staff").doc("itemCosts/i1").get());
   });
+  it("อ่าน/เขียนแผนเงินสดไม่ได้", async () => {
+    await assertFails(as("staff").doc("cashplan/main").get());
+    await assertFails(as("staff").doc("cashplan/main").set({ opening: 1 }));
+  });
   it("ดูรายชื่อผู้ใช้/โปรไฟล์คนอื่นไม่ได้", async () => {
     await assertFails(as("staff").collection("users").get());
     await assertFails(as("staff").doc("users/owner").get());
@@ -115,6 +119,8 @@ describe("เจ้าของ", () => {
     await assertSucceeds(db.doc("itemCosts/i1").get());
     await assertSucceeds(db.doc("settings/shop").set({ name: "ร้านใหม่" }));
     await assertSucceeds(db.doc("prices/p1").set({ at: 1 }));
+    await assertSucceeds(db.doc("cashplan/main").set({ opening: 1000, recurring: [], oneoff: [] }));
+    await assertSucceeds(db.doc("cashplan/main").get());
   });
   it("จัดการผู้ใช้ได้", async () => {
     const db = as("owner");

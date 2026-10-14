@@ -39,6 +39,11 @@ service cloud.firestore {
       allow write: if isOwner();
     }
 
+    // แผนเงินสด: เจ้าของเท่านั้น
+    match /cashplan/{id} {
+      allow read, write: if isOwner();
+    }
+
     // ต้นทุนแยก: เจ้าของอ่าน/แก้ได้คนเดียว
     // ลูกน้องเพิ่มได้แค่รายการซื้อเข้าใน pending (อ่านไม่ได้) เครื่องเจ้าของจะคำนวณทุนเฉลี่ยให้
     match /itemCosts/{id} {

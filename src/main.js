@@ -6,6 +6,7 @@ import { itemCostPerKg } from "./lib/cost.js";
 import { docPrefix, maxDocSeq, formatDocNo } from "./lib/docno.js";
 import { localStore, dbStore } from "./lib/store.js";
 import { lineCost } from "./lib/item-costs.js";
+import { buildPlan } from "./lib/cashplan.js";
 import { firebase } from "./lib/firebase.js";
 import {
   initAuth,
@@ -51,13 +52,14 @@ function startSubs(){
   const sub=(c,o,cb)=>{ const u=store.sub(c,o,cb); unsubs.push(typeof u==="function"?u:()=>{}); };
   sub("items",{},v=>{items=v;render();renderProfit();});
   sub("moves",{order:"at",limit:600},v=>{moves=v;renderLog();});
-  sub("buys",{order:"at",limit:1000},v=>{buys=v;renderBuys();renderProfit();renderCash();renderAlerts();});
-  sub("docs",{order:"at",limit:1000},v=>{docs=v;renderDocs();renderProfit();renderCash();renderAlerts();if(moneyView==="report")renderReport();});
+  sub("buys",{order:"at",limit:1000},v=>{buys=v;renderBuys();renderProfit();renderCash();renderAlerts();if(moneyView==="plan")renderPlan();});
+  sub("docs",{order:"at",limit:1000},v=>{docs=v;renderDocs();renderProfit();renderCash();renderAlerts();if(moneyView==="report")renderReport();if(moneyView==="plan")renderPlan();});
   sub("closes",{order:"at",limit:120},v=>{closes=v.map(c=>({...c,date:c.date||c.id}));if(moneyView==="close"&&!$("#tab-close").hidden&&document.activeElement?.closest?.("#closeBody")==null)renderClose();});
   sub("prices",{order:"at",limit:30},v=>{priceHist=v;});
   sub("orders",{order:"at",limit:500},v=>{orders=v;renderDocs();});
   sub("customers",{},v=>{customers=v;fillCustList();if(docFilter==="ลูกค้า")renderCustDir();});
   sub("cash",{order:"at",limit:2000},v=>{cash=v;renderCash();renderProfit();});
+  if(realOwner) sub("cashplan",{},v=>{ cashPlan=v.find(x=>x.id==="main")||null; if(moneyView==="plan"&&document.activeElement?.closest?.("#planBody")==null) renderPlan(); });
   sub("settings",{},v=>{ const s=v.find(x=>x.id==="shop"); shop={...DEFAULT_SHOP,...(s||{})}; const g=v.find(x=>x.id==="scrap"); grades=g&&Array.isArray(g.grades)?g.grades:[]; $("#shopTitle").textContent = shop.name ? `คลังเหล็ก · ${shop.name}` : "คลังเหล็ก"; });
 }
 function stopSubs(){ unsubs.forEach(u=>{ try{u();}catch(e){} }); unsubs=[]; }
@@ -300,8 +302,8 @@ $("#stockTableBody")?.addEventListener("click", e => {
 document.querySelectorAll(".segbar button").forEach(b=>b.addEventListener("click",()=>{
   moneyView=b.dataset.mv;
   document.querySelectorAll(".segbar button").forEach(x=>x.setAttribute("aria-selected",x===b));
-  ["cash","profit","report","close"].forEach(k=>$("#tab-"+k).hidden=moneyView!==k); setFab();
-  if(moneyView==="report") renderReport(); if(moneyView==="close") renderClose();
+  ["cash","profit","report","close","plan"].forEach(k=>$("#tab-"+k).hidden=moneyView!==k); setFab();
+  if(moneyView==="report") renderReport(); if(moneyView==="close") renderClose(); if(moneyView==="plan") renderPlan();
 }));
 $("#fab").addEventListener("click",()=>{ if(tab==="stock")openEdit(null); else if(tab==="buy")openBuy(null); else if(tab==="doc")openQuick(); else if(tab==="money")openCash(null,"out"); });
 $("#q").addEventListener("input",render);
@@ -1890,7 +1892,7 @@ function applyRole(){
   if(roleInfo){
     roleInfo.textContent = realOwner ? (staffPreview ? "เจ้าของ (กำลังดูแบบลูกน้อง: ซ่อนต้นทุน/กำไร)" : "เจ้าของร้าน — มีสิทธิ์เต็มทุกฟังก์ชัน") : "ลูกน้อง (แคชเชียร์) — ซ่อนต้นทุนและกำไร";
   }
-  if(isStaff() && moneyView === "profit") {
+  if(isStaff() && (moneyView === "profit" || moneyView === "plan")) {
     const cashTab = document.querySelector('.segbar [data-mv=cash]');
     if(cashTab) cashTab.click();
   }
@@ -2500,6 +2502,71 @@ function renderAlerts(){
   $("#alerts").innerHTML=h;
   document.querySelector('.tabbar [data-tab=money]').classList.toggle("dot",!!(pay.length||recv.length));
 }
+
+/* ===================== cash plan (เจ้าของเท่านั้น, คำนวณใน src/lib/cashplan.js) ===================== */
+let cashPlan=null;
+const planData=()=>({opening:0,openingAt:0,recurring:[],oneoff:[],...(cashPlan||{})});
+async function savePlan(ch){ try{ await store.set("cashplan/main",{...planData(),...ch,updatedAt:Date.now()}); return true; }catch(e){ toast("บันทึกไม่สำเร็จ"); return false; } }
+function renderPlan(){
+  const pd=planData();
+  const receivables=docs.filter(d=>d.type==="credit"&&docOwed(d)>0).map(d=>({amt:docOwed(d),due:d.due||d.date||d.at,title:`${d.customer} · ${d.no}`}));
+  const payables=buys.filter(b=>buyOwed(b)>0).map(b=>({amt:buyOwed(b),due:b.due||b.date||b.at,title:`${b.seller}${b.billNo?" · บิล "+b.billNo:""}`}));
+  const p=buildPlan({opening:pd.opening,receivables,payables,recurring:pd.recurring,oneoff:pd.oneoff});
+  const dd=t=>new Date(t).toLocaleDateString("th-TH",{day:"numeric",month:"short"});
+  const KIND={recv:"ลูกหนี้","pay":"จ่ายเจ้าหนี้","pay-overdue":"เจ้าหนี้เกินกำหนด",recurring:"ประจำเดือน",oneoff:"ครั้งเดียว"};
+  const neg=p.weeks.find(w=>w.balance<0);
+  $("#planBody").innerHTML=`
+  <div class="grid">
+    <label>เงินสด + เงินในบัญชีตอนนี้ (บาท)<input id="plOpen" type="number" inputmode="decimal" step="any" value="${pd.openingAt?pd.opening:""}" placeholder="กรอกยอดเงินที่มีจริง"></label>
+    <button class="btn primary" id="plOpenSave" style="align-self:end">บันทึกยอดตั้งต้น</button>
+  </div>
+  <p class="hint">${pd.openingAt?`ยอดตั้งต้นบันทึกเมื่อ ${dlong(pd.openingAt)} — อัปเดตเป็นระยะให้ตรงกับเงินจริง`:"ยังไม่ได้กรอกยอดเงินตั้งต้น แผนด้านล่างเริ่มจาก 0"}</p>
+  <div class="kpi">
+    <div><span>ต่ำสุดใน 8 สัปดาห์</span><b class="num ${p.lowest.balance<0?"neg":""}">${fmt(p.lowest.balance)}</b></div>
+    <div><span>ปลายสัปดาห์ที่ 8</span><b class="num ${p.final<0?"neg":""}">${fmt(p.final)}</b></div>
+    <div><span>ลูกหนี้เกินกำหนด</span><b class="num">${fmt(p.overdueIn.total)}</b></div>
+  </div>
+  ${neg?`<div class="msg bad">⚠ เงินจะติดลบในสัปดาห์ ${dd(neg.start)}–${dd(neg.end-DAY)} (คงเหลือ ${money(neg.balance)} บาท)</div>`:""}
+  <h4 class="sec">รายสัปดาห์</h4>
+  ${p.weeks.map(w=>`<details class="mrow" style="display:block"><summary style="display:flex;justify-content:space-between;gap:8px;cursor:pointer">
+      <span>${dd(w.start)}–${dd(w.end-DAY)}<br><small><span class="pos">+${fmt(w.in)}</span> · <span class="neg">−${fmt(w.out)}</span></small></span>
+      <b class="num ${w.balance<0?"neg":""}">${fmt(w.balance)}</b></summary>
+      ${w.items.length?w.items.map(i=>`<div class="mrow"><span>${esc(i.title||"")}<br><small>${KIND[i.kind]||""} · ${dd(i.t)}</small></span><span class="num ${i.dir==="in"?"pos":"neg"}">${i.dir==="in"?"+":"−"}${fmt(i.amt)}</span></div>`).join(""):`<p class="hint">ไม่มีรายการ</p>`}
+    </details>`).join("")}
+  ${p.overdueIn.items.length?`<h4 class="sec">ลูกหนี้เกินกำหนด (ยังไม่แน่นอน ไม่นับรวมในยอด)</h4>`+p.overdueIn.items.map(r=>`<div class="mrow"><span>${esc(r.title)}<br><small>ครบกำหนด ${dlong(r.due)}</small></span><span class="num">${fmt(r.amt)}</span></div>`).join(""):""}
+  <h4 class="sec">รายการประจำเดือน</h4>
+  ${pd.recurring.map(r=>`<div class="mrow"><span>${esc(r.name)}<br><small>ทุกวันที่ ${r.day} · ${r.dir==="in"?"รับ":"จ่าย"}</small></span><span class="num ${r.dir==="in"?"pos":"neg"}">${fmt(r.amount)} <button class="btn ghost" data-rdel="${esc(r.id)}" aria-label="ลบ">✕</button></span></div>`).join("")||`<p class="hint">เช่น ค่าเช่า ค่าแรง ค่าไฟ</p>`}
+  <div class="grid">
+    <label>ชื่อรายการ<input id="plRName" maxlength="60" placeholder="ค่าแรงลูกน้อง"></label>
+    <label>จำนวนเงิน<input id="plRAmt" type="number" inputmode="decimal" min="0" step="any"></label>
+    <label>ทุกวันที่<input id="plRDay" type="number" inputmode="numeric" min="1" max="31" step="1" placeholder="1–31"></label>
+    <label>ประเภท<select id="plRDir"><option value="out">จ่าย</option><option value="in">รับ</option></select></label>
+  </div>
+  <button class="btn" id="plRAdd" style="width:100%;margin-top:6px">+ เพิ่มรายการประจำ</button>
+  <h4 class="sec">รายการครั้งเดียว</h4>
+  ${pd.oneoff.filter(o=>o.date>=todayStart()).sort((a,b)=>a.date-b.date).map(o=>`<div class="mrow"><span>${esc(o.name)}<br><small>${dlong(o.date)} · ${o.dir==="in"?"รับ":"จ่าย"}</small></span><span class="num ${o.dir==="in"?"pos":"neg"}">${fmt(o.amount)} <button class="btn ghost" data-odel="${esc(o.id)}" aria-label="ลบ">✕</button></span></div>`).join("")||`<p class="hint">เช่น ซื้อเหล็กล็อตใหญ่ ผ่อนรถ</p>`}
+  <div class="grid">
+    <label>ชื่อรายการ<input id="plOName" maxlength="60" placeholder="ซื้อเหล็กล็อตใหญ่"></label>
+    <label>จำนวนเงิน<input id="plOAmt" type="number" inputmode="decimal" min="0" step="any"></label>
+    <label>วันที่<input id="plODate" type="date" value="${today()}"></label>
+    <label>ประเภท<select id="plODir"><option value="out">จ่าย</option><option value="in">รับ</option></select></label>
+  </div>
+  <button class="btn" id="plOAdd" style="width:100%;margin-top:6px">+ เพิ่มรายการครั้งเดียว</button>
+  <p class="hint">ลูกหนี้และเจ้าหนี้ดึงจากใบแจ้งหนี้และบิลซื้อเชื่อที่ยังค้างอยู่ตามวันครบกำหนด เจ้าหนี้ที่เกินกำหนดแล้วนับในสัปดาห์นี้</p>`;
+}
+$("#planBody").addEventListener("click",async e=>{
+  const pd=planData(), t=e.target;
+  if(t.id==="plOpenSave"){ const v=$("#plOpen").value; if(v==="") return toast("ใส่ยอดเงินตั้งต้น");
+    if(await savePlan({opening:Math.round((+v||0)*100)/100,openingAt:Date.now()})) toast("บันทึกยอดตั้งต้นแล้ว"); return; }
+  if(t.id==="plRAdd"){ const name=$("#plRName").value.trim(), amount=Math.round((+$("#plRAmt").value||0)*100)/100, day=Math.floor(+$("#plRDay").value);
+    if(!name||!(amount>0)) return toast("ใส่ชื่อและจำนวนเงิน"); if(!(day>=1&&day<=31)) return toast("วันที่ต้องอยู่ระหว่าง 1–31");
+    if(await savePlan({recurring:[...pd.recurring,{id:uid(),name,amount,day,dir:$("#plRDir").value}]})) toast("เพิ่มรายการประจำแล้ว"); return; }
+  if(t.id==="plOAdd"){ const name=$("#plOName").value.trim(), amount=Math.round((+$("#plOAmt").value||0)*100)/100, ds=$("#plODate").value;
+    if(!name||!(amount>0)) return toast("ใส่ชื่อและจำนวนเงิน"); if(!ds) return toast("เลือกวันที่");
+    if(await savePlan({oneoff:[...pd.oneoff,{id:uid(),name,amount,date:new Date(ds+"T12:00").getTime(),dir:$("#plODir").value}]})) toast("เพิ่มรายการครั้งเดียวแล้ว"); return; }
+  const r=t.closest("[data-rdel]"); if(r&&confirm("ลบรายการประจำนี้?")) return savePlan({recurring:pd.recurring.filter(x=>x.id!==r.dataset.rdel)});
+  const o=t.closest("[data-odel]"); if(o&&confirm("ลบรายการนี้?")) return savePlan({oneoff:pd.oneoff.filter(x=>x.id!==o.dataset.odel)});
+});
 
 /* ===================== quick sale ===================== */
 let qcart=[];
